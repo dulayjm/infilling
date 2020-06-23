@@ -1,2 +1,5 @@
 *.csv
 infilling_env/*
+model/*
+output/*
+samples/*
