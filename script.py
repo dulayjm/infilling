@@ -1,13 +1,3 @@
-#!/usr/bin/env python
-# coding: utf-8
-
-# In[8]:
-
-
-#!/usr/bin/env python
-# coding: utf-8
-
-# In[117]:
 
 # DF-Net Imports
 from collections import defaultdict
@@ -77,7 +67,7 @@ def map_features(outputs, labels, out_file):
 
 # Configurations
 # Device
-device = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
+device = torch.device("cuda:2" if torch.cuda.is_available() else "cpu")
 
 # Num epochs
 num_epochs = 15
@@ -521,7 +511,7 @@ class Inpainter:
 
     def init_model(self, path):
         if torch.cuda.is_available():
-            self.device = torch.device('cuda')
+            self.device = torch.device('gpu')
             print('Using gpu.')
         else:
             self.device = torch.device('cpu')
@@ -529,7 +519,7 @@ class Inpainter:
 
         self.model = DFNet().to(self.device)
         checkpoint = torch.load(path, map_location=self.device)
-        self.model.load_state_dict(checkpoint)
+        self.model.load_state_dict(checkpoint) # loading in that pre-trained model
         self.model.eval()
 
         print('Model %s loaded.' % path)
@@ -756,7 +746,7 @@ def train_model():
     train_values = []
 
     # DF-Net Tester Instantiate
-    pretrained_model_path = './model/model_celeba.pth'
+    pretrained_model_path = './model/model_places2.pth'
     inpainter = Inpainter(pretrained_model_path, 256, 8)  # was 8, should it be 1 or 32 or 128?
 
     # Epochs
@@ -808,6 +798,14 @@ def train_model():
                 inpainted_img_batch, labels = inpainted_img_batch.to(device, dtype=torch.float), labels.to(device)
 
                 output = model(inpainted_img_batch)
+
+                print(output.shape)
+                break
+
+                plt.imshow(transforms.ToPILImage()(output[0][0]), interpolation="bicubic")
+                plt.savefig('outputs.png')
+                plt.close()
+                break
                 # output = model(inputs)
 
                 #             print("inpainted_img_batch.shape",inpainted_img_batch.shape)

@@ -4,3 +4,6 @@ model/*
 output/*
 samples/*
 outfile.png
+old_masks/*
+nohup.out
+*.png
