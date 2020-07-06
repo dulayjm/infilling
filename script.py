@@ -84,7 +84,7 @@ batch_size = 32
 
 # Data set
 # train_path = '/lab/vislab/DATA/CUB/images/train/'
-train_path = '/lab/vislab/DATA/just/infilling/mini/'
+train_path = '/lab/vislab/DATA/just/infilling/samples/places2/mini/'
 
 mask_path = './samples/places2/mask/'
 
@@ -511,7 +511,7 @@ class Inpainter:
 
     def init_model(self, path):
         if torch.cuda.is_available():
-            self.device = torch.device('gpu')
+            self.device = torch.device('cuda:2')
             print('Using gpu.')
         else:
             self.device = torch.device('cpu')
