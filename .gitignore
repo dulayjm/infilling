@@ -3,7 +3,5 @@ infilling_env/*
 model/*
 output/*
 samples/*
-outfile.png
-old_masks/*
-nohup.out
+*.out
 *.png
