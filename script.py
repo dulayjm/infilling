@@ -662,9 +662,10 @@ class Inpainter:
         result = imgs * masks + result * (1 - masks)
 
         result = self.to_numpy(result)
-
+        
         #         results.append(result)
-        results = np.append(results, result, axis=0)
+
+        # results = np.append(results, result, axis=0)
 
         alpha = self.to_numpy(alpha)
         raw = self.to_numpy(raw)
@@ -673,6 +674,11 @@ class Inpainter:
             cv2.imwrite(str(batch['result_path'][i]), result[i])
             cv2.imwrite(str(batch['raw_path'][i]), raw[i])
             cv2.imwrite(str(batch['alpha_path'][i]), alpha[i])
+
+        # here, result is [8,256,256,3]
+        result = np.transpose(result, [0,3,1,2])
+        for i in range(result.shape[0]):
+            results.append(result[i])
 
     @property
     def root(self):
@@ -709,9 +715,9 @@ class Inpainter:
 
         print('# Inpainting...')
         print('Input size:', self.input_size)
-        results = np.empty((32, 256, 256, 3),
-                           int)  # it's just following this dimension? # are we getting the error here?
-        #         results = []
+        # results = np.empty((32, 256, 256, 3),
+                        #    int)  # it's just following this dimension? # are we getting the error here?
+        results = []
         for batch in self.batch_generator():
             self.process_batch(batch, output, results)
         print('Inpainting finished.')
@@ -728,9 +734,13 @@ class Inpainter:
                 miss, self.sub_dir('raw'), self.sub_dir('alpha'),
                 self.sub_dir('result'), img], merge, res=self.input_size[0])
             print('Merging finished.')
+        # plt.imshow(results[0], interpolation='nearest')
+        # plt.savefig("inside_the_loop2.png")
+        # plt.close()
 
-        results = np.transpose(results, [0, 3, 1, 2])
+        # results = np.transpose(results, [0, 3, 1, 2])
 
+        results = np.array(results)
         return results
 
 
@@ -769,16 +779,16 @@ def train_model():
 
             # Batches
             for batch_idx, (inputs, labels) in enumerate(train_loader):
+                
+                print("inputs.shape: ", inputs.shape)
 
                 img_path = './samples/places2/img/'
                 os.makedirs(img_path)
 
-                for img_idx in range(batch_size - 1):
-
-                    img = inputs[img_idx]  # or is it running out here
+                for img_idx in range(batch_size):
+                    img = inputs[img_idx]                    
 
                     img_idx_name = ''
-                    # so that should be 0-9
                     if img_idx < 10:
                         img_idx_name = '0%d' % img_idx
                     else:
@@ -789,30 +799,28 @@ def train_model():
                 inpainted_img_batch = inpainter.inpaint('output/places2/', img_path, mask_path, merge_result=True)
                 inpainted_img_batch = torch.from_numpy(inpainted_img_batch)
 
+                print("inpainted batch shape", inpainted_img_batch.shape)
+
                 # delete img_path
                 shutil.rmtree(img_path)
 
                 optimizer.zero_grad()
                 # inputs, labels = inputs.to(device), labels.to(device)
-
+                # output = model(inputs)
                 inpainted_img_batch, labels = inpainted_img_batch.to(device, dtype=torch.float), labels.to(device)
-
+                lab_str = str(labels[1])
+                plt.figure(figsize=(16,10))
+                plt.imshow(transforms.ToPILImage()(inpainted_img_batch[20].cpu()), interpolation="bicubic")
+                plt.title(lab_str)
+                plt.savefig("outputs_tensor.png")
+                plt.close()
                 output = model(inpainted_img_batch)
 
-                print(output.shape)
-                break
 
-                plt.imshow(transforms.ToPILImage()(output[0][0]), interpolation="bicubic")
-                plt.savefig('outputs.png')
-                plt.close()
-                break
-                # output = model(inputs)
 
-                #             print("inpainted_img_batch.shape",inpainted_img_batch.shape)
-                #             print("labels.shape",labels.shape)
+                print("outputs.shape",output.shape)
 
                 loss = criterion(output, labels)
-                # loss = Variable(loss, requires_grad=True)
                 with torch.set_grad_enabled(phase == 'train'):
                     if phase == 'train':
                         loss.backward()
@@ -845,12 +853,9 @@ def train_model():
                     accuracy = correct / (correct + incorrect)
                     train_values.append(accuracy)
                 else:
-                    accuracy = "this is weird AF "
+                    accuracy = "Can't divide by 0."
                 print("Accuracy: ", accuracy)
 
-                # t-SNE
-                # map_features(running_outputs, running_labels, "outfile")
-                # Loss Plot
                 loss_values.append(running_loss / num_batches)
 
             time_elapsed = datetime.now() - start_time
