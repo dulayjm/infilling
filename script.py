@@ -10,6 +10,7 @@ import tqdm
 
 # Imports
 from datetime import datetime
+import kornia
 import matplotlib.pyplot as plt
 import matplotlib.style as style
 import numpy as np
@@ -28,7 +29,6 @@ from torch.utils.data.sampler import Sampler
 from torchvision import datasets, models, transforms
 from torchvision.utils import save_image
 
-# In[118]:
 
 
 from sklearn.manifold import TSNE
@@ -70,7 +70,7 @@ def map_features(outputs, labels, out_file):
 device = torch.device("cuda:2" if torch.cuda.is_available() else "cpu")
 
 # Num epochs
-num_epochs = 15
+num_epochs = 5
 
 # Model
 model = models.resnet50(pretrained=True)
@@ -83,18 +83,14 @@ optimizer = torch.optim.SGD(model.parameters(), lr=0.01, momentum=0.9)
 batch_size = 32
 
 # Data set
-# train_path = '/lab/vislab/DATA/CUB/images/train/'
-train_path = '/lab/vislab/DATA/just/infilling/samples/places2/mini/'
+train_path = '/lab/vislab/DATA/CUB/images/train/'
+# train_path = '/lab/vislab/DATA/just/infilling/samples/places2/mini/'
 
 mask_path = './samples/places2/mask/'
 
 # Loss function
 criterion = losses.TripletMarginLoss(margin=0.05,triplets_per_anchor="all")
 # criterion = torch.nn.CosineEmbeddingLoss()
-
-
-# In[120]:
-
 
 class RandomMask(object):
     """Add random occlusions to image.
@@ -118,28 +114,22 @@ class RandomMask(object):
         return sample
 
 
-# In[121]:
-
-
-# Dataset
-
 # mask = Image.open('./samples/places2/mask/mask_01.png')
 
 transformations = transforms.Compose([
     transforms.Resize((256, 256)),
     # RandomMask(mask),
     transforms.ToTensor(),
+    transforms.Normalize(mean = [ 0.485, 0.456, 0.406 ], std = [ 0.229, 0.224, 0.225 ])
 ])
 
 dataset = datasets.ImageFolder(train_path, transformations)
-
 
 # train_sampler = torch.utils.data.RandomSampler(train_set)
 train_sampler = samplers.MPerClassSampler(dataset.targets, 2, len(dataset))
 
 train_loader = torch.utils.data.DataLoader(dataset, batch_size=batch_size,
                                            sampler=train_sampler, num_workers=4, drop_last=True)
-
 
 # DF-Net Utils
 def resize_like(x, target, mode='bilinear'):
@@ -539,28 +529,28 @@ class Inpainter:
                 'alpha-{}-{}.png'.format(img_name, mask_name))
         }
 
-    def inpaint_instance(self, img, mask):
-        """Assume color image with 3 dimension. CWH"""
-        img = img.view(1, *img.shape)
-        mask = mask.view(1, 1, *mask.shape)
-        return self.inpaint_batch(img, mask).squeeze()
+    # def inpaint_instance(self, img, mask):
+    #     """Assume color image with 3 dimension. CWH"""
+    #     img = img.view(1, *img.shape)
+    #     mask = mask.view(1, 1, *mask.shape)
+    #     return self.inpaint_batch(img, mask).squeeze()
 
-    def inpaint_batch(self, imgs, masks):
-        """Assume color channel is BGR and input is NWHC np.uint8."""
-        imgs = np.transpose(imgs, [0, 3, 1, 2])
-        masks = np.transpose(masks, [0, 3, 1, 2])
+    # def inpaint_batch(self, imgs, masks):
+    #     """Assume color channel is BGR and input is NWHC np.uint8."""
+    #     imgs = np.transpose(imgs, [0, 3, 1, 2])
+    #     masks = np.transpose(masks, [0, 3, 1, 2])
 
-        imgs = torch.from_numpy(imgs).to(self.device)
-        masks = torch.from_numpy(masks).to(self.device)
-        imgs = imgs.float().div(255)
-        masks = masks.float().div(255)
-        imgs_miss = imgs * masks
-        results = self.model(imgs_miss, masks)
-        if type(results) is list:
-            results = results[0]
-        results = results.mul(255).byte().data.cpu().numpy()
-        results = np.transpose(results, [0, 2, 3, 1])
-        return results
+    #     imgs = torch.from_numpy(imgs).to(self.device)
+    #     masks = torch.from_numpy(masks).to(self.device)
+    #     imgs = imgs.float().div(255)
+    #     masks = masks.float().div(255)
+    #     imgs_miss = imgs * masks
+    #     results = self.model(imgs_miss, masks)
+    #     if type(results) is list:
+    #         results = results[0]
+    #     results = results.mul(255).byte().data.cpu().numpy()
+    #     results = np.transpose(results, [0, 2, 3, 1])
+    #     return results
 
     def _process_file(self, output, img_path, mask_path):
         item = {
@@ -587,9 +577,11 @@ class Inpainter:
         n_pair = min(n_img, n_mask)
 
         self.path_pair = []
+        # self.label_pairs = []
         for i in range(n_pair):
             img_path = imgs_path[i % n_img]
             mask_path = masks_path[i % n_mask]
+            # self.label_pairs.append(label) # add label
             self._process_file(output, img_path, mask_path)
 
     def get_process(self, input_size):
@@ -612,7 +604,7 @@ class Inpainter:
         return process
 
     def _file_batch(self):
-        pool = Pool()  # should be os.cpu_count() ...
+        pool = Pool()  # attach those labels, somehow
 
         n_pair = len(self.path_pair)
         n_batch = (n_pair - 1) // self.batch_size + 1
@@ -625,7 +617,6 @@ class Inpainter:
             process = self.get_process(self.input_size)
             batch = pool.imap_unordered(
                 process, islice(self.path_pair, start, stop))
-            # so we aren't going through here, EDIT now we are
 
             for instance in batch:
                 for k, v in instance.items():
@@ -653,19 +644,36 @@ class Inpainter:
     def process_batch(self, batch, output, results):
         imgs = torch.from_numpy(batch['img']).to(self.device)
         masks = torch.from_numpy(batch['mask']).to(self.device)
+
+        print("Batch images SHAPE: ", imgs.shape)
         imgs = imgs.float().div(255)
         masks = masks.float().div(255)
+
+
+        print("image shape", imgs.shape)
+        print("mask shape", masks.shape)
+
+
         imgs_miss = imgs * masks
+
+        plt.imshow(transforms.ToPILImage()(imgs_miss[0].cpu()))
+        plt.savefig('img_miss_sanity.png')
 
         result, alpha, raw = self.model(imgs_miss, masks)
         result, alpha, raw = result[0], alpha[0], raw[0]
+
+
+
+        plt.imshow(transforms.ToPILImage()(result[0][0].cpu()))
+        plt.savefig('result_before_fusion.png')
+
         result = imgs * masks + result * (1 - masks)
 
+
+        plt.imshow(transforms.ToPILImage()(result[0][0].cpu()))
+        plt.savefig('result_after_fusion.png')
         result = self.to_numpy(result)
         
-        #         results.append(result)
-
-        # results = np.append(results, result, axis=0)
 
         alpha = self.to_numpy(alpha)
         raw = self.to_numpy(raw)
@@ -674,6 +682,7 @@ class Inpainter:
             cv2.imwrite(str(batch['result_path'][i]), result[i])
             cv2.imwrite(str(batch['raw_path'][i]), raw[i])
             cv2.imwrite(str(batch['alpha_path'][i]), alpha[i])
+            result[i] = cv2.cvtColor(result[i], cv2.COLOR_BGR2RGB)
 
         # here, result is [8,256,256,3]
         result = np.transpose(result, [0,3,1,2])
@@ -691,58 +700,109 @@ class Inpainter:
         for folder in folders:
             Path(folder).mkdir(parents=True, exist_ok=True)
 
-    def inpaint(self, output, img, mask, merge_result=False):
+    def inpaint(self, output,  imgs, img, mask, merge_result=False):
 
         self.output = output
-        self.prepare_folders([
-            self.sub_dir('result'), self.sub_dir('alpha'),
-            self.sub_dir('raw')])
 
-        if os.path.isfile(img) and os.path.isfile(mask):
-            if img.endswith(('.png', '.jpg', '.jpeg')):
-                self.process_single_file(output, img, mask)
-                _type = 'file'
-            else:
-                raise NotImplementedError()
-        elif os.path.isdir(img) and os.path.isdir(mask):
-            self.process_dir(output, img, mask)
-            _type = 'dir'
-        else:
-            print('Img: ', img)
-            print('Mask: ', mask)
-            raise NotImplementedError(
-                'img and mask should be both file or directory.')
+        masks = []
+        for filename in os.scandir(mask_path):
+            ii = cv2.imread(filename.path)
+            mask = cv2.cvtColor(ii, cv2.COLOR_BGR2GRAY)       
+            # im = np.array(Image.open(filename.path).convert('L'))
+            mask = np.ascontiguousarray(np.expand_dims(mask, 0)).astype(np.uint8)
+            # im = np.array(im)
+            # im = np.expand_dims(im, axis=-1)
+            print("img loader MASK.SHAPE", mask.shape)
+            masks.append(mask)
 
-        print('# Inpainting...')
-        print('Input size:', self.input_size)
-        # results = np.empty((32, 256, 256, 3),
-                        #    int)  # it's just following this dimension? # are we getting the error here?
-        results = []
-        for batch in self.batch_generator():
-            self.process_batch(batch, output, results)
-        print('Inpainting finished.')
-        ## so results should contain everything now
 
-        if merge_result and _type == 'dir':
-            miss = self.sub_dir('miss')
-            merge = self.sub_dir('merge')
+        masks = np.array(masks)
+        print("mask loader MASK.SHAPE", masks.shape)
+        # masks = np.transpose(masks, [0,3,1,2])
+        print("mask loader MASK.SHAPE", masks.shape)
+        masks = torch.from_numpy(masks)
+        print("mask loader MASK.SHAPE", masks.shape)
 
-            print('# Preparing input images...')
-            gen_miss(img, mask, miss)  # dfnet util fn
-            print('# Merging...')
-            merge_imgs([
-                miss, self.sub_dir('raw'), self.sub_dir('alpha'),
-                self.sub_dir('result'), img], merge, res=self.input_size[0])
-            print('Merging finished.')
-        # plt.imshow(results[0], interpolation='nearest')
-        # plt.savefig("inside_the_loop2.png")
-        # plt.close()
+        print("Batch images SHAPE: ", imgs.shape)
 
-        # results = np.transpose(results, [0, 3, 1, 2])
+        # convert to npy -> opencv -> shift colors -> npy -> torch
+        imgs = self.to_numpy(imgs)
+        for i in range(imgs.shape[0]):
+            imgs[i] = cv2.cvtColor(imgs[i], cv2.COLOR_BGR2RGB)
+            # imgs[i] = np.transpose(imgs[i], [2,0,1])
 
-        results = np.array(results)
-        return results
+        print("IMGS: AFTER BGR. shape: ", imgs.shape)
+        imgs = np.transpose(imgs, [0,3,1,2])
+        imgs = torch.from_numpy(imgs)
 
+        imgs = imgs.to(self.device)
+        masks = masks.to(self.device)
+
+        plt.imshow(transforms.ToPILImage()(masks[0].cpu()))
+        plt.savefig('transformed_mask_sanity.png')
+
+        imgs = imgs.float().div(255)
+        masks = masks.float().div(255)
+
+        imgs_miss = imgs * masks
+
+        plt.imshow(transforms.ToPILImage()(imgs_miss[0].cpu()))
+        plt.savefig('transformed_miss_sanity.png')
+
+        result, alpha, raw = self.model(imgs_miss, masks)
+        result, alpha, raw = result[0], alpha[0], raw[0]
+        plt.imshow(transforms.ToPILImage()(result[0][0].cpu()))
+        plt.savefig('result_before_fusion.png')
+
+        result = imgs * masks + result * (1 - masks)
+        plt.imshow(transforms.ToPILImage()(result[0][0].cpu()))
+        plt.savefig('result_after_fusion.png')
+
+
+        return result
+
+        # self.prepare_folders([
+        #     self.sub_dir('result'), self.sub_dir('alpha'),
+        #     self.sub_dir('raw')])
+
+        # if os.path.isfile(img) and os.path.isfile(mask):
+        #     if img.endswith(('.png', '.jpg', '.jpeg')):
+        #         self.process_single_file(output, img, mask)
+        #         _type = 'file'
+        #     else:
+        #         raise NotImplementedError()
+        # elif os.path.isdir(img) and os.path.isdir(mask):
+        #     self.process_dir(output, img, mask)
+        #     _type = 'dir'
+        # else:
+        #     print('Img: ', img)
+        #     print('Mask: ', mask)
+        #     raise NotImplementedError(
+        #         'img and mask should be both file or directory.')
+
+        # print('# Inpainting...')
+        # print('Input size:', self.input_size)
+
+        # results = []
+        # for batch in self.batch_generator():
+        #     self.process_batch(batch, output, results)
+        # print('Inpainting finished.')
+
+        # if merge_result and _type == 'dir':
+        #     miss = self.sub_dir('miss')
+        #     merge = self.sub_dir('merge')
+
+        #     print('# Preparing input images...')
+        #     gen_miss(img, mask, miss)
+        #     print('# Merging...')
+        #     merge_imgs([
+        #         miss, self.sub_dir('raw'), self.sub_dir('alpha'),
+        #         self.sub_dir('result'), img], merge, res=self.input_size[0])
+        #     print('Merging finished.')
+
+        # results = np.array(results)
+
+        # return results
 
 # Main Trainer
 def train_model():
@@ -757,7 +817,7 @@ def train_model():
 
     # DF-Net Tester Instantiate
     pretrained_model_path = './model/model_places2.pth'
-    inpainter = Inpainter(pretrained_model_path, 256, 8)  # was 8, should it be 1 or 32 or 128?
+    inpainter = Inpainter(pretrained_model_path, 256, 32)
 
     # Epochs
     for epoch in range(num_epochs):
@@ -780,8 +840,6 @@ def train_model():
             # Batches
             for batch_idx, (inputs, labels) in enumerate(train_loader):
                 
-                print("inputs.shape: ", inputs.shape)
-
                 img_path = './samples/places2/img/'
                 os.makedirs(img_path)
 
@@ -796,28 +854,33 @@ def train_model():
 
                     save_image(img, './samples/places2/img/img_{}.png'.format(img_idx_name))
 
-                inpainted_img_batch = inpainter.inpaint('output/places2/', img_path, mask_path, merge_result=True)
-                inpainted_img_batch = torch.from_numpy(inpainted_img_batch)
+                inpainted_img_batch = inpainter.inpaint('output/places2/', inputs, img_path, mask_path, merge_result=True) # if you can pass in the labels
+                # inpainted_img_batch = torch.from_numpy(inpainted_img_batch)
 
                 print("inpainted batch shape", inpainted_img_batch.shape)
 
-                # delete img_path
                 shutil.rmtree(img_path)
 
                 optimizer.zero_grad()
                 # inputs, labels = inputs.to(device), labels.to(device)
                 # output = model(inputs)
                 inpainted_img_batch, labels = inpainted_img_batch.to(device, dtype=torch.float), labels.to(device)
-                lab_str = str(labels[1])
-                plt.figure(figsize=(16,10))
-                plt.imshow(transforms.ToPILImage()(inpainted_img_batch[20].cpu()), interpolation="bicubic")
-                plt.title(lab_str)
-                plt.savefig("outputs_tensor.png")
-                plt.close()
+
+                for i in range(batch_size-1):
+                    lab_str = str(labels[i].cpu())
+                    plt.figure(figsize=(16,10))
+                    plt.imshow(transforms.ToPILImage()(inputs[i].cpu()))
+                    plt.title(lab_str)
+                    plt.savefig("inputs_{}.png".format(i))
+                    plt.close()
+
+                    plt.figure(figsize=(16,10))
+                    plt.imshow(transforms.ToPILImage()(inpainted_img_batch[i].cpu()))
+                    plt.title(lab_str)
+                    plt.savefig("inpainted_inputs_{}.png".format(i))
+                    plt.close()
+                
                 output = model(inpainted_img_batch)
-
-
-
                 print("outputs.shape",output.shape)
 
                 loss = criterion(output, labels)
@@ -894,34 +957,7 @@ model.to(device)
 
 trained_model, loss = train_model()
 
-# In[ ]:
 
-
-# RuntimeError: Expected 4-dimensional input for 4-dimensional weight 64 3 7 7,
-# but got 5-dimensional input of size [4, 8, 256, 256, 3] instead
-# so just reshape that np first. change torch channel placement
-
-
-## inpainted_img_batch.shape torch.Size([8, 3, 256, 256])
-## labels.shape torch.Size([32])
-
-# # Debug cell
-# train_sampler = torch.utils.data.RandomSampler(train_set)
-# train_loader = torch.utils.data.DataLoader(train_set, batch_size=batch_size,
-#                                            sampler=train_sampler, num_workers=4)
-#
-# for batch_idx, (inputs, labels) in enumerate(train_loader):
-#     print(batch_idx)
-#     print(type(inputs))
-#     # plot
-#     #     plt.imshow(transforms.ToPILImage()(inputs[31]), interpolation="bicubic")
-#     print(inputs.shape)
-#
-#     break
-#
-# # In[ ]:
-#
-#
 # # Test Script
 #
 # print(type(trained_model))
