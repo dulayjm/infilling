@@ -70,7 +70,7 @@ def map_features(outputs, labels, out_file):
 device = torch.device("cuda:2" if torch.cuda.is_available() else "cpu")
 
 # Num epochs
-num_epochs = 5
+num_epochs = 15
 
 # Model
 model = models.resnet50(pretrained=True)
@@ -125,7 +125,6 @@ transformations = transforms.Compose([
 
 dataset = datasets.ImageFolder(train_path, transformations)
 
-# train_sampler = torch.utils.data.RandomSampler(train_set)
 train_sampler = samplers.MPerClassSampler(dataset.targets, 2, len(dataset))
 
 train_loader = torch.utils.data.DataLoader(dataset, batch_size=batch_size,
@@ -189,7 +188,7 @@ def gen_miss(img, mask, output):
 def merge_imgs(dirs, output, row=1, gap=2, res=512):
     image_list = [get_img_list(path) for path in dirs]
     img_count = [len(image) for image in image_list]
-    print('Total images:', img_count)  # should be batch size when we walk back into here ...
+    print('Total images:', img_count)
     assert min(img_count) > 0, 'Please check the path of empty folder.'
 
     output_dir = Path(output)
@@ -490,6 +489,7 @@ class Inpainter:
         self.batch_size = batch_size
         self.init_model(model_path)
 
+
     @property
     def input_size(self):
         if self._input_size > 0:
@@ -498,6 +498,7 @@ class Inpainter:
             return (256, 256)
         else:
             return (256, 256)
+
 
     def init_model(self, path):
         if torch.cuda.is_available():
@@ -514,216 +515,15 @@ class Inpainter:
 
         print('Model %s loaded.' % path)
 
-    def get_name(self, path):
-        return '.'.join(path.name.split('.')[:-1])
-
-    def results_path(self, output, img_path, mask_path, prefix='result'):
-        img_name = self.get_name(img_path)
-        mask_name = self.get_name(mask_path)
-        return {
-            'result_path': self.sub_dir('result').joinpath(
-                'result-{}-{}.png'.format(img_name, mask_name)),
-            'raw_path': self.sub_dir('raw').joinpath(
-                'raw-{}-{}.png'.format(img_name, mask_name)),
-            'alpha_path': self.sub_dir('alpha').joinpath(
-                'alpha-{}-{}.png'.format(img_name, mask_name))
-        }
-
-    # def inpaint_instance(self, img, mask):
-    #     """Assume color image with 3 dimension. CWH"""
-    #     img = img.view(1, *img.shape)
-    #     mask = mask.view(1, 1, *mask.shape)
-    #     return self.inpaint_batch(img, mask).squeeze()
-
-    # def inpaint_batch(self, imgs, masks):
-    #     """Assume color channel is BGR and input is NWHC np.uint8."""
-    #     imgs = np.transpose(imgs, [0, 3, 1, 2])
-    #     masks = np.transpose(masks, [0, 3, 1, 2])
-
-    #     imgs = torch.from_numpy(imgs).to(self.device)
-    #     masks = torch.from_numpy(masks).to(self.device)
-    #     imgs = imgs.float().div(255)
-    #     masks = masks.float().div(255)
-    #     imgs_miss = imgs * masks
-    #     results = self.model(imgs_miss, masks)
-    #     if type(results) is list:
-    #         results = results[0]
-    #     results = results.mul(255).byte().data.cpu().numpy()
-    #     results = np.transpose(results, [0, 2, 3, 1])
-    #     return results
-
-    def _process_file(self, output, img_path, mask_path):
-        item = {
-            'img_path': img_path,
-            'mask_path': mask_path,
-        }
-        item.update(self.results_path(output, img_path, mask_path))
-        self.path_pair.append(item)
-
-    def process_single_file(self, output, img_path, mask_path):
-        self.path_pair = []
-        self._process_file(output, img_path, mask_path)
-
-    def process_dir(self, output, img_dir, mask_dir):
-        img_dir = Path(img_dir)
-        mask_dir = Path(mask_dir)
-        imgs_path = sorted(
-            list(img_dir.glob('*.jpg')) + list(img_dir.glob('*.png')))
-        masks_path = sorted(
-            list(mask_dir.glob('*.jpg')) + list(mask_dir.glob('*.png')))
-
-        n_img = len(imgs_path)
-        n_mask = len(masks_path)
-        n_pair = min(n_img, n_mask)
-
-        self.path_pair = []
-        # self.label_pairs = []
-        for i in range(n_pair):
-            img_path = imgs_path[i % n_img]
-            mask_path = masks_path[i % n_mask]
-            # self.label_pairs.append(label) # add label
-            self._process_file(output, img_path, mask_path)
-
-    def get_process(self, input_size):
-        def process(pair):
-            img = cv2.imread(str(pair['img_path']), cv2.IMREAD_COLOR)
-            mask = cv2.imread(str(pair['mask_path']), cv2.IMREAD_GRAYSCALE)
-            if input_size:
-                #                 img = img[0:256, 0:256]
-                #                 mask = mask[0:64, 0:64] ## ALSO HERE
-                img = cv2.resize(img, input_size)
-                mask = cv2.resize(mask, input_size)
-            img = np.ascontiguousarray(img.transpose(2, 0, 1)).astype(np.uint8)
-            mask = np.ascontiguousarray(
-                np.expand_dims(mask, 0)).astype(np.uint8)
-
-            pair['img'] = img
-            pair['mask'] = mask
-            return pair
-
-        return process
-
-    def _file_batch(self):
-        pool = Pool()  # attach those labels, somehow
-
-        n_pair = len(self.path_pair)
-        n_batch = (n_pair - 1) // self.batch_size + 1
-
-        for i in tqdm.trange(n_batch, leave=False):
-            _buffer = defaultdict(list)
-            print(_buffer)
-            start = i * self.batch_size
-            stop = start + self.batch_size
-            process = self.get_process(self.input_size)
-            batch = pool.imap_unordered(
-                process, islice(self.path_pair, start, stop))
-
-            for instance in batch:
-                for k, v in instance.items():
-                    _buffer[k].append(v)
-            yield _buffer
-
-        pool.close()
-        pool.join()
-
-    def batch_generator(self):
-        generator = self._file_batch
-
-        for _buffer in generator():
-            for key in _buffer:
-
-                if key in ['img', 'mask']:
-                    _buffer[key] = list2nparray(_buffer[key])
-            yield _buffer
 
     def to_numpy(self, tensor):
         tensor = tensor.mul(255).byte().data.cpu().numpy()
         tensor = np.transpose(tensor, [0, 2, 3, 1])
         return tensor
 
-    def process_batch(self, batch, output, results):
-        imgs = torch.from_numpy(batch['img']).to(self.device)
-        masks = torch.from_numpy(batch['mask']).to(self.device)
 
-        print("Batch images SHAPE: ", imgs.shape)
-        imgs = imgs.float().div(255)
-        masks = masks.float().div(255)
-
-
-        print("image shape", imgs.shape)
-        print("mask shape", masks.shape)
-
-
-        imgs_miss = imgs * masks
-
-        plt.imshow(transforms.ToPILImage()(imgs_miss[0].cpu()))
-        plt.savefig('img_miss_sanity.png')
-
-        result, alpha, raw = self.model(imgs_miss, masks)
-        result, alpha, raw = result[0], alpha[0], raw[0]
-
-
-
-        plt.imshow(transforms.ToPILImage()(result[0][0].cpu()))
-        plt.savefig('result_before_fusion.png')
-
-        result = imgs * masks + result * (1 - masks)
-
-
-        plt.imshow(transforms.ToPILImage()(result[0][0].cpu()))
-        plt.savefig('result_after_fusion.png')
-        result = self.to_numpy(result)
-        
-
-        alpha = self.to_numpy(alpha)
-        raw = self.to_numpy(raw)
-
-        for i in range(result.shape[0]):
-            cv2.imwrite(str(batch['result_path'][i]), result[i])
-            cv2.imwrite(str(batch['raw_path'][i]), raw[i])
-            cv2.imwrite(str(batch['alpha_path'][i]), alpha[i])
-            result[i] = cv2.cvtColor(result[i], cv2.COLOR_BGR2RGB)
-
-        # here, result is [8,256,256,3]
-        result = np.transpose(result, [0,3,1,2])
-        for i in range(result.shape[0]):
-            results.append(result[i])
-
-    @property
-    def root(self):
-        return Path(self.output)
-
-    def sub_dir(self, sub):
-        return self.root.joinpath(sub)
-
-    def prepare_folders(self, folders):
-        for folder in folders:
-            Path(folder).mkdir(parents=True, exist_ok=True)
-
-    def inpaint(self, output,  imgs, img, mask, merge_result=False):
-
-        self.output = output
-
-        masks = []
-        for filename in os.scandir(mask_path):
-            ii = cv2.imread(filename.path)
-            mask = cv2.cvtColor(ii, cv2.COLOR_BGR2GRAY)       
-            # im = np.array(Image.open(filename.path).convert('L'))
-            mask = np.ascontiguousarray(np.expand_dims(mask, 0)).astype(np.uint8)
-            # im = np.array(im)
-            # im = np.expand_dims(im, axis=-1)
-            print("img loader MASK.SHAPE", mask.shape)
-            masks.append(mask)
-
-
-        masks = np.array(masks)
-        print("mask loader MASK.SHAPE", masks.shape)
-        # masks = np.transpose(masks, [0,3,1,2])
-        print("mask loader MASK.SHAPE", masks.shape)
-        masks = torch.from_numpy(masks)
-        print("mask loader MASK.SHAPE", masks.shape)
-
-        print("Batch images SHAPE: ", imgs.shape)
+    def inpaint(self, imgs, masks):
+        print("inpainting images ...")
 
         # convert to npy -> opencv -> shift colors -> npy -> torch
         imgs = self.to_numpy(imgs)
@@ -731,7 +531,7 @@ class Inpainter:
             imgs[i] = cv2.cvtColor(imgs[i], cv2.COLOR_BGR2RGB)
             # imgs[i] = np.transpose(imgs[i], [2,0,1])
 
-        print("IMGS: AFTER BGR. shape: ", imgs.shape)
+        # print("IMGS: AFTER BGR. shape: ", imgs.shape)
         imgs = np.transpose(imgs, [0,3,1,2])
         imgs = torch.from_numpy(imgs)
 
@@ -739,7 +539,7 @@ class Inpainter:
         masks = masks.to(self.device)
 
         plt.imshow(transforms.ToPILImage()(masks[0].cpu()))
-        plt.savefig('transformed_mask_sanity.png')
+        plt.savefig('transformed_mask.png')
 
         imgs = imgs.float().div(255)
         masks = masks.float().div(255)
@@ -747,7 +547,7 @@ class Inpainter:
         imgs_miss = imgs * masks
 
         plt.imshow(transforms.ToPILImage()(imgs_miss[0].cpu()))
-        plt.savefig('transformed_miss_sanity.png')
+        plt.savefig('transformed_miss.png')
 
         result, alpha, raw = self.model(imgs_miss, masks)
         result, alpha, raw = result[0], alpha[0], raw[0]
@@ -758,51 +558,8 @@ class Inpainter:
         plt.imshow(transforms.ToPILImage()(result[0][0].cpu()))
         plt.savefig('result_after_fusion.png')
 
-
         return result
 
-        # self.prepare_folders([
-        #     self.sub_dir('result'), self.sub_dir('alpha'),
-        #     self.sub_dir('raw')])
-
-        # if os.path.isfile(img) and os.path.isfile(mask):
-        #     if img.endswith(('.png', '.jpg', '.jpeg')):
-        #         self.process_single_file(output, img, mask)
-        #         _type = 'file'
-        #     else:
-        #         raise NotImplementedError()
-        # elif os.path.isdir(img) and os.path.isdir(mask):
-        #     self.process_dir(output, img, mask)
-        #     _type = 'dir'
-        # else:
-        #     print('Img: ', img)
-        #     print('Mask: ', mask)
-        #     raise NotImplementedError(
-        #         'img and mask should be both file or directory.')
-
-        # print('# Inpainting...')
-        # print('Input size:', self.input_size)
-
-        # results = []
-        # for batch in self.batch_generator():
-        #     self.process_batch(batch, output, results)
-        # print('Inpainting finished.')
-
-        # if merge_result and _type == 'dir':
-        #     miss = self.sub_dir('miss')
-        #     merge = self.sub_dir('merge')
-
-        #     print('# Preparing input images...')
-        #     gen_miss(img, mask, miss)
-        #     print('# Merging...')
-        #     merge_imgs([
-        #         miss, self.sub_dir('raw'), self.sub_dir('alpha'),
-        #         self.sub_dir('result'), img], merge, res=self.input_size[0])
-        #     print('Merging finished.')
-
-        # results = np.array(results)
-
-        # return results
 
 # Main Trainer
 def train_model():
@@ -814,6 +571,16 @@ def train_model():
     num_batches = 1
     loss_values = []
     train_values = []
+
+    masks = []
+    for filename in os.scandir(mask_path):
+        ii = cv2.imread(filename.path)
+        mask = cv2.cvtColor(ii, cv2.COLOR_BGR2GRAY)       
+        mask = np.ascontiguousarray(np.expand_dims(mask, 0)).astype(np.uint8)
+        masks.append(mask)
+
+    masks = np.array(masks)
+    masks = torch.from_numpy(masks)
 
     # DF-Net Tester Instantiate
     pretrained_model_path = './model/model_places2.pth'
@@ -839,29 +606,11 @@ def train_model():
 
             # Batches
             for batch_idx, (inputs, labels) in enumerate(train_loader):
+                optimizer.zero_grad()
                 
-                img_path = './samples/places2/img/'
-                os.makedirs(img_path)
-
-                for img_idx in range(batch_size):
-                    img = inputs[img_idx]                    
-
-                    img_idx_name = ''
-                    if img_idx < 10:
-                        img_idx_name = '0%d' % img_idx
-                    else:
-                        img_idx_name = '%d' % img_idx
-
-                    save_image(img, './samples/places2/img/img_{}.png'.format(img_idx_name))
-
-                inpainted_img_batch = inpainter.inpaint('output/places2/', inputs, img_path, mask_path, merge_result=True) # if you can pass in the labels
-                # inpainted_img_batch = torch.from_numpy(inpainted_img_batch)
-
+                inpainted_img_batch = inpainter.inpaint(inputs, masks)
                 print("inpainted batch shape", inpainted_img_batch.shape)
 
-                shutil.rmtree(img_path)
-
-                optimizer.zero_grad()
                 # inputs, labels = inputs.to(device), labels.to(device)
                 # output = model(inputs)
                 inpainted_img_batch, labels = inpainted_img_batch.to(device, dtype=torch.float), labels.to(device)
@@ -946,170 +695,8 @@ def train_model():
     return model, running_loss
 
 
-# In[127]:
-
-
 # Run Script
 
 model.to(device)
 
-# perhaps parameterize the train model to take in our pre-processed data
-
 trained_model, loss = train_model()
-
-
-# # Test Script
-#
-# print(type(trained_model))
-# trained_model.test()
-#
-# print("Finished.")
-#
-#
-# # In[22]:
-#
-#
-# # Testing
-# def test():
-#     trained_model.eval()
-#     test_running_outputs = torch.FloatTensor().cpu()
-#     test_running_labels = torch.LongTensor().cpu()
-#     test_running_loss = 0.0
-#     correct = 0
-#     incorrect = 0
-#
-#     test_sampler = torch.utils.data.RandomSampler(test_set)
-#     test_loader = torch.utils.data.DataLoader(test_set, batch_size=batch_size,
-#                                               sampler=test_sampler, num_workers=4)
-#
-#     with torch.no_grad():
-#         for data, labels in test_loader:
-#             data, labels = data.to(device), labels.to(device)
-#             output = trained_model(data)
-#
-#             test_running_outputs = torch.cat((test_running_outputs, output.cpu().detach()), 0)
-#             test_running_labels = torch.cat((test_running_labels, labels.cpu().detach()), 0)
-#
-#             test_loss = criterion(output, labels)
-#             test_running_loss += loss.item()
-#
-#         # Accuracy
-#         for idx, emb in enumerate(running_outputs.to(device)):
-#             pairwise = torch.nn.PairwiseDistance(p=2).to(device)
-#             dist = pairwise(emb, running_outputs.to(device))
-#             closest = torch.topk(dist, 2, largest=False).indices[1]
-#             if running_labels[idx] == running_labels[closest]:
-#                 correct += 1
-#             else:
-#                 incorrect += 1
-#
-#         map_features(test_running_outputs, test_running_labels, "test_outfile")
-#         print("correct", correct)
-#         print("incorrect", incorrect)
-#
-# # In[ ]:
-#
-#
-# # # DF-Net Train Loop
-# # def train_dfnet():
-# #     """Generic function to train model"""
-#
-# #     print("Training model ...")
-#
-# #     start_time = datetime.now()
-# #     loss_values = []
-# #     num_batches = 0
-#
-# #     # Epochs
-# #     for epoch in range(num_epochs):
-# #         print("epoch num:", epoch)
-# #         train_sampler = torch.utils.data.RandomSampler(train_set)
-# #         train_loader = torch.utils.data.DataLoader(train_set, batch_size=batch_size,
-# #                                                sampler=train_sampler, num_workers=4)
-#
-# #         running_outputs = torch.FloatTensor().cpu()
-# #         running_labels = torch.LongTensor().cpu()
-# #         running_loss = 0.0
-# #         dfnet_model.train()
-#
-# #         # Batches
-# #         for batch_idx, (inputs, labels) in enumerate(train_loader):
-#
-# #             num_batches += 1
-# #             optimizer.zero_grad()
-#
-# #             inputs, labels = inputs.to(device), labels.to(device)
-# #             output = dfnet_model.forward(inputs)
-#
-# #             running_outputs = torch.cat((running_outputs, output.cpu().detach()), 0)
-# #             running_labels = torch.cat((running_labels, labels.cpu().detach()), 0)
-#
-# #             loss = criterion(output, labels)
-# #             loss = Variable(loss, requires_grad = True)
-#
-# #             loss.backward()
-# #             optimizer.step()
-#
-# #             running_loss += loss.item()
-#
-# #         # Loss Plot
-# #         loss_values.append(running_loss / num_batches)
-#
-# #         time_elapsed = datetime.now() - start_time
-# #         print('Time elapsed (hh:mm:ss.ms) {}'.format(time_elapsed))
-#
-# #     plt.plot(loss_values)
-# #     return dfnet_model, running_loss
-#
-#
-# # In[ ]:
-#
-#
-# # # DF-Net outputs
-# # # TODO: implement this
-# # # but how can we parameterize thi?
-#
-# # def inpaint():
-# #     running_outputs = torch.FloatTensor().cpu()
-# #     running_labels = torch.LongTensor().cpu()
-# #     running_loss = 0.0
-#
-# #     dfnet_sampler = torch.utils.data.RandomSampler(test_set)
-# #     dfnet_loader = torch.utils.data.DataLoader(test_set, batch_size=batch_size,
-# #                                            sampler=dfnet_sampler, num_workers=4)
-#
-# #     with torch.no_grad():
-# #         for data, labels in dfnet_loader:
-# #             data, labels = data.to(device), labels.to(device)
-# #             output = model(data)
-#
-# #             running_outputs = torch.cat((running_outputs, output.cpu().detach()), 0)
-# #             running_labels = torch.cat((running_labels, labels.cpu().detach()), 0)
-#
-# #             loss = criterion(output, labels)
-# #             running_loss += loss.item()
-#
-#
-# #     print(type(output))
-# #     print(output.shape)
-# #     print(type(output[0][0]))
-#
-# #     return output
-#
-#
-# # In[ ]:
-#
-#
-# # # Train DF-Net
-# # dfnet_model.to(device)
-# # dfnet_model, loss = train_dfnet()
-#
-# # print(loss)
-#
-
-
-# In[ ]:
-
-
-
-
