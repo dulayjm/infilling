@@ -7,7 +7,7 @@ import torch.nn.functional as F
 import tqdm
 
 # Imports
-from accuracy import map_features
+# from accuracy import map_features
 from datetime import datetime
 import matplotlib.pyplot as plt
 import matplotlib.style as style
@@ -26,7 +26,6 @@ import torch.nn as nn
 from torch.utils.data.sampler import Sampler
 from torchvision import datasets, models, transforms
 from torchvision.utils import save_image
-
 
 # DF-Net Utils
 def resize_like(x, target, mode='bilinear'):
@@ -86,7 +85,7 @@ def gen_miss(img, mask, output):
 def merge_imgs(dirs, output, row=1, gap=2, res=512):
     image_list = [get_img_list(path) for path in dirs]
     img_count = [len(image) for image in image_list]
-    print('Total images:', img_count)  # should be batch size when we walk back into here ...
+    print('Total images:', img_count)
     assert min(img_count) > 0, 'Please check the path of empty folder.'
 
     output_dir = Path(output)
@@ -387,6 +386,7 @@ class Inpainter:
         self.batch_size = batch_size
         self.init_model(model_path)
 
+
     @property
     def input_size(self):
         if self._input_size > 0:
@@ -396,9 +396,10 @@ class Inpainter:
         else:
             return (256, 256)
 
+
     def init_model(self, path):
         if torch.cuda.is_available():
-            self.device = torch.device('gpu')
+            self.device = torch.device('cuda:2')
             print('Using gpu.')
         else:
             self.device = torch.device('cpu')
@@ -411,226 +412,59 @@ class Inpainter:
 
         print('Model %s loaded.' % path)
 
-    def get_name(self, path):
-        return '.'.join(path.name.split('.')[:-1])
-
-    def results_path(self, output, img_path, mask_path, prefix='result'):
-        img_name = self.get_name(img_path)
-        mask_name = self.get_name(mask_path)
-        return {
-            'result_path': self.sub_dir('result').joinpath(
-                'result-{}-{}.png'.format(img_name, mask_name)),
-            'raw_path': self.sub_dir('raw').joinpath(
-                'raw-{}-{}.png'.format(img_name, mask_name)),
-            'alpha_path': self.sub_dir('alpha').joinpath(
-                'alpha-{}-{}.png'.format(img_name, mask_name))
-        }
-
-    def inpaint_instance(self, img, mask):
-        """Assume color image with 3 dimension. CWH"""
-        img = img.view(1, *img.shape)
-        mask = mask.view(1, 1, *mask.shape)
-        return self.inpaint_batch(img, mask).squeeze()
-
-    def inpaint_batch(self, imgs, masks):
-        """Assume color channel is BGR and input is NWHC np.uint8."""
-        imgs = np.transpose(imgs, [0, 3, 1, 2])
-        masks = np.transpose(masks, [0, 3, 1, 2])
-
-        imgs = torch.from_numpy(imgs).to(self.device)
-        masks = torch.from_numpy(masks).to(self.device)
-        imgs = imgs.float().div(255)
-        masks = masks.float().div(255)
-        imgs_miss = imgs * masks
-        results = self.model(imgs_miss, masks)
-        if type(results) is list:
-            results = results[0]
-        results = results.mul(255).byte().data.cpu().numpy()
-        results = np.transpose(results, [0, 2, 3, 1])
-        return results
-
-    def _process_file(self, output, img_path, mask_path):
-        item = {
-            'img_path': img_path,
-            'mask_path': mask_path,
-        }
-        item.update(self.results_path(output, img_path, mask_path))
-        self.path_pair.append(item)
-
-    def process_single_file(self, output, img_path, mask_path):
-        self.path_pair = []
-        self._process_file(output, img_path, mask_path)
-
-    def process_dir(self, output, img_dir, mask_dir):
-        img_dir = Path(img_dir)
-        mask_dir = Path(mask_dir)
-        imgs_path = sorted(
-            list(img_dir.glob('*.jpg')) + list(img_dir.glob('*.png')))
-        masks_path = sorted(
-            list(mask_dir.glob('*.jpg')) + list(mask_dir.glob('*.png')))
-
-        n_img = len(imgs_path)
-        n_mask = len(masks_path)
-        n_pair = min(n_img, n_mask)
-
-        self.path_pair = []
-        for i in range(n_pair):
-            img_path = imgs_path[i % n_img]
-            mask_path = masks_path[i % n_mask]
-            self._process_file(output, img_path, mask_path)
-
-    def get_process(self, input_size):
-        def process(pair):
-            img = cv2.imread(str(pair['img_path']), cv2.IMREAD_COLOR)
-            mask = cv2.imread(str(pair['mask_path']), cv2.IMREAD_GRAYSCALE)
-            if input_size:
-                #                 img = img[0:256, 0:256]
-                #                 mask = mask[0:64, 0:64] ## ALSO HERE
-                img = cv2.resize(img, input_size)
-                mask = cv2.resize(mask, input_size)
-            img = np.ascontiguousarray(img.transpose(2, 0, 1)).astype(np.uint8)
-            mask = np.ascontiguousarray(
-                np.expand_dims(mask, 0)).astype(np.uint8)
-
-            pair['img'] = img
-            pair['mask'] = mask
-            return pair
-
-        return process
-
-    def _file_batch(self):
-        pool = Pool()  # should be os.cpu_count() ...
-
-        n_pair = len(self.path_pair)
-        n_batch = (n_pair - 1) // self.batch_size + 1
-
-        for i in tqdm.trange(n_batch, leave=False):
-            _buffer = defaultdict(list)
-            print(_buffer)
-            start = i * self.batch_size
-            stop = start + self.batch_size
-            process = self.get_process(self.input_size)
-            batch = pool.imap_unordered(
-                process, islice(self.path_pair, start, stop))
-            # so we aren't going through here, EDIT now we are
-
-            for instance in batch:
-                for k, v in instance.items():
-                    _buffer[k].append(v)
-            yield _buffer
-
-        pool.close()
-        pool.join()
-
-    def batch_generator(self):
-        generator = self._file_batch
-
-        for _buffer in generator():
-            for key in _buffer:
-
-                if key in ['img', 'mask']:
-                    _buffer[key] = list2nparray(_buffer[key])
-            yield _buffer
 
     def to_numpy(self, tensor):
         tensor = tensor.mul(255).byte().data.cpu().numpy()
         tensor = np.transpose(tensor, [0, 2, 3, 1])
         return tensor
 
-    def process_batch(self, batch, output, results):
-        imgs = torch.from_numpy(batch['img']).to(self.device)
-        masks = torch.from_numpy(batch['mask']).to(self.device)
+
+    def inpaint(self, imgs, masks):
+        print("inpainting images ...")
+
+        # convert to npy -> opencv -> shift colors -> npy -> torch
+        imgs = self.to_numpy(imgs)
+        for i in range(imgs.shape[0]):
+            imgs[i] = cv2.cvtColor(imgs[i], cv2.COLOR_BGR2RGB)
+            # imgs[i] = np.transpose(imgs[i], [2,0,1])
+
+        # print("IMGS: AFTER BGR. shape: ", imgs.shape)
+        imgs = np.transpose(imgs, [0,3,1,2])
+        imgs = torch.from_numpy(imgs)
+
+        imgs = imgs.to(self.device)
+        masks = masks.to(self.device)
+
+        # plt.imshow(transforms.ToPILImage()(masks[0].cpu()))
+        # plt.savefig('transformed_mask.png')
+
         imgs = imgs.float().div(255)
         masks = masks.float().div(255)
+
         imgs_miss = imgs * masks
+
+        # plt.imshow(transforms.ToPILImage()(imgs_miss[0].cpu()))
+        # plt.savefig('transformed_miss.png')
 
         result, alpha, raw = self.model(imgs_miss, masks)
         result, alpha, raw = result[0], alpha[0], raw[0]
+        # plt.imshow(transforms.ToPILImage()(result[0][0].cpu()))
+        # plt.savefig('result_before_fusion.png')
+
         result = imgs * masks + result * (1 - masks)
+        # plt.imshow(transforms.ToPILImage()(result[0][0].cpu()))
+        # plt.savefig('result_after_fusion.png')
 
-        result = self.to_numpy(result)
-
-        #         results.append(result)
-        results = np.append(results, result, axis=0)
-
-        alpha = self.to_numpy(alpha)
-        raw = self.to_numpy(raw)
-
-        for i in range(result.shape[0]):
-            cv2.imwrite(str(batch['result_path'][i]), result[i])
-            cv2.imwrite(str(batch['raw_path'][i]), raw[i])
-            cv2.imwrite(str(batch['alpha_path'][i]), alpha[i])
-
-    @property
-    def root(self):
-        return Path(self.output)
-
-    def sub_dir(self, sub):
-        return self.root.joinpath(sub)
-
-    def prepare_folders(self, folders):
-        for folder in folders:
-            Path(folder).mkdir(parents=True, exist_ok=True)
-
-    def inpaint(self, output, img, mask, merge_result=False):
-
-        self.output = output
-        self.prepare_folders([
-            self.sub_dir('result'), self.sub_dir('alpha'),
-            self.sub_dir('raw')])
-
-        if os.path.isfile(img) and os.path.isfile(mask):
-            if img.endswith(('.png', '.jpg', '.jpeg')):
-                self.process_single_file(output, img, mask)
-                _type = 'file'
-            else:
-                raise NotImplementedError()
-        elif os.path.isdir(img) and os.path.isdir(mask):
-            self.process_dir(output, img, mask)
-            _type = 'dir'
-        else:
-            print('Img: ', img)
-            print('Mask: ', mask)
-            raise NotImplementedError(
-                'img and mask should be both file or directory.')
-
-        print('# Inpainting...')
-        print('Input size:', self.input_size)
-        results = np.empty((32, 256, 256, 3),
-                           int)  # it's just following this dimension? # are we getting the error here?
-        #         results = []
-        for batch in self.batch_generator():
-            self.process_batch(batch, output, results)
-        print('Inpainting finished.')
-        ## so results should contain everything now
-
-        if merge_result and _type == 'dir':
-            miss = self.sub_dir('miss')
-            merge = self.sub_dir('merge')
-
-            print('# Preparing input images...')
-            gen_miss(img, mask, miss)  # dfnet util fn
-            print('# Merging...')
-            merge_imgs([
-                miss, self.sub_dir('raw'), self.sub_dir('alpha'),
-                self.sub_dir('result'), img], merge, res=self.input_size[0])
-            print('Merging finished.')
-
-        results = np.transpose(results, [0, 3, 1, 2])
-
-        return results
+        return result
 
 
 # Main Trainer
-# TODO: add some options around the inpainting portion of this file
 def train_model(config):
     """Generic function to train model"""
 
-    num_epochs = config['num_epochs']
-    train_loader = config['train_loader']
-    batch_size = config['batch_size']
     model = config['model']
-    criterion = config['criterion']
+    optimizer = config['optimizer']
+    device = config['device']
 
     start_time = datetime.now()
     correct = 0
@@ -639,12 +473,22 @@ def train_model(config):
     loss_values = []
     train_values = []
 
+    masks = []
+    for filename in os.scandir(config["mask_path"]):
+        ii = cv2.imread(filename.path)
+        mask = cv2.cvtColor(ii, cv2.COLOR_BGR2GRAY)       
+        mask = np.ascontiguousarray(np.expand_dims(mask, 0)).astype(np.uint8)
+        masks.append(mask)
+
+    masks = np.array(masks)
+    masks = torch.from_numpy(masks)
+
     # DF-Net Tester Instantiate
     pretrained_model_path = './model/model_places2.pth'
-    inpainter = Inpainter(pretrained_model_path, 256, 8)  # was 8, should it be 1 or 32 or 128?
+    inpainter = Inpainter(pretrained_model_path, 256, 32)
 
     # Epochs
-    for epoch in range(num_epochs):
+    for epoch in range(config["num_epochs"]):
         print("epoch num:", epoch)
 
         for phase in ['train', 'valid']:
@@ -662,50 +506,18 @@ def train_model(config):
                 model.train(False)
 
             # Batches
-            for batch_idx, (inputs, labels) in enumerate(train_loader):
-
-                img_path = './samples/places2/img/'
-                os.makedirs(img_path)
-
-                for img_idx in range(batch_size - 1):
-
-                    img = inputs[img_idx]  # or is it running out here
-
-                    img_idx_name = ''
-                    # so that should be 0-9
-                    if img_idx < 10:
-                        img_idx_name = '0%d' % img_idx
-                    else:
-                        img_idx_name = '%d' % img_idx
-
-                    save_image(img, './samples/places2/img/img_{}.png'.format(img_idx_name))
-
-                inpainted_img_batch = inpainter.inpaint('output/places2/', img_path, mask_path, merge_result=True)
-                inpainted_img_batch = torch.from_numpy(inpainted_img_batch)
-
-                # delete img_path
-                shutil.rmtree(img_path)
-
+            for batch_idx, (inputs, labels) in enumerate(config["train_loader"]):
                 optimizer.zero_grad()
+                
+                inpainted_img_batch = inpainter.inpaint(inputs, masks)
+
                 # inputs, labels = inputs.to(device), labels.to(device)
-
+                # output = model(inputs)
                 inpainted_img_batch, labels = inpainted_img_batch.to(device, dtype=torch.float), labels.to(device)
-
+                
                 output = model(inpainted_img_batch)
 
-                print(output.shape)
-
-                plt.imshow(transforms.ToPILImage()(output[0][0]), interpolation="bicubic")
-                plt.savefig('output/justin/outputs.png')
-                plt.close()
-                break
-                # output = model(inputs)
-
-                #             print("inpainted_img_batch.shape",inpainted_img_batch.shape)
-                #             print("labels.shape",labels.shape)
-
                 loss = criterion(output, labels)
-                # loss = Variable(loss, requires_grad=True)
                 with torch.set_grad_enabled(phase == 'train'):
                     if phase == 'train':
                         loss.backward()
@@ -738,7 +550,7 @@ def train_model(config):
                     accuracy = correct / (correct + incorrect)
                     train_values.append(accuracy)
                 else:
-                    accuracy = "Error: correct + incorrect == 0"
+                    accuracy = "Can't divide by 0."
                 print("Accuracy: ", accuracy)
 
                 loss_values.append(running_loss / num_batches)
@@ -763,6 +575,6 @@ def train_model(config):
     plt.show()
     plt.savefig('loss.png')
 
-    map_features(running_outputs.cpu(), running_labels.cpu(), 'output/justin/features.png')
+    map_features(running_outputs.cpu(), running_labels.cpu(), 'features.png')
 
     return model, running_loss

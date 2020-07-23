@@ -41,8 +41,8 @@ optimizer = torch.optim.SGD(model.parameters(), lr=0.01, momentum=0.9)
 batch_size = 32
 
 # Data set
-# train_path = '/lab/vislab/DATA/CUB/images/train/'
-train_path = '/lab/vislab/DATA/just/infilling/samples/places2/mini/'
+train_path = '/lab/vislab/DATA/CUB/images/train/'
+# train_path = '/lab/vislab/DATA/just/infilling/samples/places2/mini/'
 
 # Inpainting mask path
 mask_path = './samples/places2/mask/'
@@ -78,6 +78,7 @@ config = {
     'inpaint' : inpaint,
     'test' : test,
     'device' : device,
+    'mask_path' : mask_path,
     'num_epochs' : num_epochs,
     'model' : model,
     'optimizer' : optimizer,

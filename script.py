@@ -1,4 +1,3 @@
-
 # DF-Net Imports
 from collections import defaultdict
 import cv2
@@ -67,10 +66,10 @@ def map_features(outputs, labels, out_file):
 
 # Configurations
 # Device
-device = torch.device("cuda:2" if torch.cuda.is_available() else "cpu")
+device = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
 
 # Num epochs
-num_epochs = 15
+num_epochs = 50
 
 # Model
 model = models.resnet50(pretrained=True)
@@ -85,8 +84,11 @@ batch_size = 32
 # Data set
 train_path = '/lab/vislab/DATA/CUB/images/train/'
 # train_path = '/lab/vislab/DATA/just/infilling/samples/places2/mini/'
+# train_path = '/lab/vislab/DATA/CARS/car_ims/train'
 
-mask_path = './samples/places2/mask/'
+# mask_path = './samples/places2/mask/'
+# mask_path = './samples/places2/old_masks/dfnet_original/'
+
 
 # Loss function
 criterion = losses.TripletMarginLoss(margin=0.05,triplets_per_anchor="all")
@@ -502,7 +504,7 @@ class Inpainter:
 
     def init_model(self, path):
         if torch.cuda.is_available():
-            self.device = torch.device('cuda:2')
+            self.device = torch.device('cuda:1')
             print('Using gpu.')
         else:
             self.device = torch.device('cpu')
@@ -538,25 +540,25 @@ class Inpainter:
         imgs = imgs.to(self.device)
         masks = masks.to(self.device)
 
-        plt.imshow(transforms.ToPILImage()(masks[0].cpu()))
-        plt.savefig('transformed_mask.png')
+        # plt.imshow(transforms.ToPILImage()(masks[0].cpu()))
+        # plt.savefig('transformed_mask.png')
 
         imgs = imgs.float().div(255)
         masks = masks.float().div(255)
 
         imgs_miss = imgs * masks
 
-        plt.imshow(transforms.ToPILImage()(imgs_miss[0].cpu()))
-        plt.savefig('transformed_miss.png')
+        # plt.imshow(transforms.ToPILImage()(imgs_miss[0].cpu()))
+        # plt.savefig('transformed_miss.png')
 
         result, alpha, raw = self.model(imgs_miss, masks)
         result, alpha, raw = result[0], alpha[0], raw[0]
-        plt.imshow(transforms.ToPILImage()(result[0][0].cpu()))
-        plt.savefig('result_before_fusion.png')
+        # plt.imshow(transforms.ToPILImage()(result[0][0].cpu()))
+        # plt.savefig('result_before_fusion.png')
 
         result = imgs * masks + result * (1 - masks)
-        plt.imshow(transforms.ToPILImage()(result[0][0].cpu()))
-        plt.savefig('result_after_fusion.png')
+        # plt.imshow(transforms.ToPILImage()(result[0][0].cpu()))
+        # plt.savefig('result_after_fusion.png')
 
         return result
 
@@ -566,119 +568,141 @@ def train_model():
     """Generic function to train model"""
 
     start_time = datetime.now()
-    correct = 0
-    incorrect = 0
-    num_batches = 1
-    loss_values = []
-    train_values = []
+    
 
-    masks = []
-    for filename in os.scandir(mask_path):
-        ii = cv2.imread(filename.path)
-        mask = cv2.cvtColor(ii, cv2.COLOR_BGR2GRAY)       
-        mask = np.ascontiguousarray(np.expand_dims(mask, 0)).astype(np.uint8)
-        masks.append(mask)
-
-    masks = np.array(masks)
-    masks = torch.from_numpy(masks)
+    
 
     # DF-Net Tester Instantiate
     pretrained_model_path = './model/model_places2.pth'
     inpainter = Inpainter(pretrained_model_path, 256, 32)
 
-    # Epochs
-    for epoch in range(num_epochs):
-        print("epoch num:", epoch)
-
-        for phase in ['train', 'valid']:
-
-            correct = 0
-            incorrect = 0
-
-            running_outputs = torch.FloatTensor().cpu()
-            running_labels = torch.LongTensor().cpu()
-            running_loss = 0.0
-
-            if phase == 'train':
-                model.train(True)
-            else:
-                model.train(False)
-
-            # Batches
-            for batch_idx, (inputs, labels) in enumerate(train_loader):
-                optimizer.zero_grad()
-                
-                inpainted_img_batch = inpainter.inpaint(inputs, masks)
-                print("inpainted batch shape", inpainted_img_batch.shape)
-
-                # inputs, labels = inputs.to(device), labels.to(device)
-                # output = model(inputs)
-                inpainted_img_batch, labels = inpainted_img_batch.to(device, dtype=torch.float), labels.to(device)
-
-                for i in range(batch_size-1):
-                    lab_str = str(labels[i].cpu())
-                    plt.figure(figsize=(16,10))
-                    plt.imshow(transforms.ToPILImage()(inputs[i].cpu()))
-                    plt.title(lab_str)
-                    plt.savefig("inputs_{}.png".format(i))
-                    plt.close()
-
-                    plt.figure(figsize=(16,10))
-                    plt.imshow(transforms.ToPILImage()(inpainted_img_batch[i].cpu()))
-                    plt.title(lab_str)
-                    plt.savefig("inpainted_inputs_{}.png".format(i))
-                    plt.close()
-                
-                output = model(inpainted_img_batch)
-                print("outputs.shape",output.shape)
-
-                loss = criterion(output, labels)
-                with torch.set_grad_enabled(phase == 'train'):
-                    if phase == 'train':
-                        loss.backward()
-                        optimizer.step()
-
-                if phase == 'valid':
-                    running_outputs = torch.cat((running_outputs, output.cpu().detach()), 0)
-                    running_labels = torch.cat((running_labels, labels.cpu().detach()), 0)
-                    running_loss += loss.item()
-                    num_batches += 1
-
-            if phase == 'valid':
-                # Accuracy
-                running_outputs = running_outputs.to(device)
-                running_labels = running_labels.to(device)
-
-                for idx, emb in enumerate(running_outputs):
-                    pairwise = torch.nn.PairwiseDistance(p=2).to(device)
-                    dist = pairwise(emb, running_outputs)
-                    closest = torch.topk(dist, 2, largest=False).indices[1]
-                    if running_labels[idx] == running_labels[closest]:
-                        correct += 1
-                    else:
-                        incorrect += 1
-
-                print(running_loss / num_batches)
-                print("Correct", correct)
-                print("Incorrect", incorrect)
-                if correct + incorrect != 0:
-                    accuracy = correct / (correct + incorrect)
-                    train_values.append(accuracy)
-                else:
-                    accuracy = "Can't divide by 0."
-                print("Accuracy: ", accuracy)
-
-                loss_values.append(running_loss / num_batches)
-
-            time_elapsed = datetime.now() - start_time
-            print('Time elapsed (hh:mm:ss.ms) {}'.format(time_elapsed))
-
     style.use('fivethirtyeight')
     plt.figure(figsize=(16, 10))
-    plt.plot(train_values)
-    plt.title("Accuracy")
+    plt.title("Accuracy with Respect to Inpainting")
     plt.xlabel("Epoch")
     plt.ylabel("Accuracy")
+    # Epochs
+    for i in range(1,6):
+        correct = 0
+        incorrect = 0
+        num_batches = 1
+        loss_values = []
+        train_values = []
+
+        mask_path = "./samples/places2/mask_0{}/".format(i)
+        masks = []
+        
+        for filename in os.scandir(mask_path):
+            ii = cv2.imread(filename.path)
+            mask = cv2.cvtColor(ii, cv2.COLOR_BGR2GRAY)       
+            mask = np.ascontiguousarray(np.expand_dims(mask, 0)).astype(np.uint8)
+            masks.append(mask)
+
+        masks = np.array(masks)
+        masks = torch.from_numpy(masks)
+
+        for epoch in range(num_epochs):
+            print("epoch num:", epoch)
+
+            for phase in ['train', 'valid']:
+
+                correct = 0
+                incorrect = 0
+
+                running_outputs = torch.FloatTensor().cpu()
+                running_labels = torch.LongTensor().cpu()
+                running_loss = 0.0
+
+                if phase == 'train':
+                    model.train(True)
+                else:
+                    model.train(False)
+
+                # Batches
+                for batch_idx, (inputs, labels) in enumerate(train_loader):
+                    optimizer.zero_grad()
+                    
+                    inpainted_img_batch = inpainter.inpaint(inputs, masks)
+
+                    # inputs, labels = inputs.to(device), labels.to(device)
+                    # output = model(inputs)
+                    inpainted_img_batch, labels = inpainted_img_batch.to(device, dtype=torch.float), labels.to(device)
+
+                    # if epoch == 0:
+                    #     lab_str = str(labels[0].cpu())
+                    #     plt.figure(figsize=(16,10))
+                    #     plt.imshow(transforms.ToPILImage()(inputs[0].cpu()))
+                    #     plt.title(lab_str)
+                    #     plt.savefig("inputs_{}.png".format(0))
+                    #     plt.close()
+
+                    #     plt.figure(figsize=(16,10))
+                    #     plt.imshow(transforms.ToPILImage()(inpainted_img_batch[0].cpu()))
+                    #     plt.title(lab_str)
+                    #     plt.savefig("inpainted_inputs_{}.png".format(0))
+                    #     plt.close()
+                    
+                    output = model(inpainted_img_batch)
+
+                    loss = criterion(output, labels)
+                    with torch.set_grad_enabled(phase == 'train'):
+                        if phase == 'train':
+                            loss.backward()
+                            optimizer.step()
+
+                    if phase == 'valid':
+                        running_outputs = torch.cat((running_outputs, output.cpu().detach()), 0)
+                        running_labels = torch.cat((running_labels, labels.cpu().detach()), 0)
+                        running_loss += loss.item()
+                        num_batches += 1
+
+                if phase == 'valid':
+                    # Accuracy
+                    running_outputs = running_outputs.to(device)
+                    running_labels = running_labels.to(device)
+
+                    for idx, emb in enumerate(running_outputs):
+                        pairwise = torch.nn.PairwiseDistance(p=2).to(device)
+                        dist = pairwise(emb, running_outputs)
+                        closest = torch.topk(dist, 2, largest=False).indices[1]
+                        if running_labels[idx] == running_labels[closest]:
+                            correct += 1
+                        else:
+                            incorrect += 1
+
+                    print(running_loss / num_batches)
+                    print("Correct", correct)
+                    print("Incorrect", incorrect)
+                    if correct + incorrect != 0:
+                        accuracy = correct / (correct + incorrect)
+                        train_values.append(accuracy)
+                    else:
+                        accuracy = "Can't divide by 0."
+                    print("Accuracy: ", accuracy)
+
+                    loss_values.append(running_loss / num_batches)
+
+                time_elapsed = datetime.now() - start_time
+                print('Time elapsed (hh:mm:ss.ms) {}'.format(time_elapsed))
+
+        # l = ""
+        # if i == 1: 
+        #     l = '0.05 masked'
+        # elif i == 2: 
+        #     l = '0.10 masked'
+        # elif i == 3: 
+        #     l = '0.25 masked'
+        # elif i == 4: 
+        #     l = '0.35 masked'
+        # elif i == 5: 
+        #     l = '0.50 masked'
+
+        control_line = train_values
+        plt.plot(train_values)
+        torch.cuda.empty_cache()
+    
+    plt.legend(handles=[inpainted_line, control_line])
+    plt.legend(["0.05", "0.10", "0.25", "0.35", "0.50"], loc ="lower right") 
     plt.show()
     plt.savefig('accuracy.png')
     plt.close()
@@ -690,7 +714,7 @@ def train_model():
     plt.show()
     plt.savefig('loss.png')
 
-    map_features(running_outputs.cpu(), running_labels.cpu(), 'features.png')
+    # map_features(running_outputs.cpu(), running_labels.cpu(), 'features.png')
 
     return model, running_loss
 

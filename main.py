@@ -1,6 +1,6 @@
 # Driver file
 
-from config import config
+from config import Config
 from train import train_model
 # from test import test_model
 
