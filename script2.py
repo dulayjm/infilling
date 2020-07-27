@@ -89,14 +89,14 @@ def map_features(outputs, labels, out_file):
 device = torch.device("cuda:2" if torch.cuda.is_available() else "cpu")
 
 # Num epochs
-num_epochs = 30
+num_epochs = 50
 
 # Model
 model = models.resnet50(pretrained=True)
 # model = ClassifierSiLU()
 
 # Optimizer
-optimizer = torch.optim.SGD(model.parameters(), lr=0.01, momentum=0.9)
+optimizer = torch.optim.SGD(model.parameters(), lr=0.05, momentum=0.9)
 
 # Batch size
 batch_size = 32
@@ -883,7 +883,7 @@ def test_model():
     plt.xlabel("Epoch")
     plt.ylabel("Accuracy")
 
-    for i in range(2,6):
+    for i in range(2,5):
 
         # Epochs
         correct = 0
@@ -1027,12 +1027,14 @@ def test_model():
         
         # at this point, do the plotting of the control on test 
 
+
+    # pure control group :
     correct = 0
     incorrect = 0
     num_batches = 1
     loss_values = []
     train_values = []
-
+    
     for epoch in range(num_epochs):
         print("epoch num:", epoch)
 
@@ -1043,10 +1045,13 @@ def test_model():
         running_labels = torch.LongTensor().cpu()
         running_loss = 0.0
 
+
         # Batches
         with torch.no_grad():
             for batch_idx, (inputs, labels) in enumerate(test_loader):
                 # optimizer.zero_grad()
+                # mask the inputs
+
                 inputs, labels = inputs.to(device), labels.to(device)
                 output = net(inputs)
                 loss = criterion(output, labels)
@@ -1083,11 +1088,85 @@ def test_model():
 
         time_elapsed = datetime.now() - start_time
         print('Time elapsed (hh:mm:ss.ms) {}'.format(time_elapsed))
-        plot6, = plt.plot(train_values)
+    plot5, = plt.plot(train_values)
 
 
-    plt.legend(["inpainting", "control"], loc ="lower right") 
-    plt.legend([plot2,plot3,plot4,plot5,plot6],[".1", ".25", ".4", ".5", "control"])
+    correct = 0
+    incorrect = 0
+    num_batches = 1
+    loss_values = []
+    train_values = []
+    mask_path = "./samples/places2/mask_02/"
+    masks = []
+    
+    for filename in os.scandir(mask_path):
+        ii = cv2.imread(filename.path)
+        mask = cv2.cvtColor(ii, cv2.COLOR_BGR2GRAY)       
+        mask = np.ascontiguousarray(np.expand_dims(mask, 0)).astype(np.uint8)
+        masks.append(mask)
+
+    masks = np.array(masks)
+    masks = torch.from_numpy(masks)
+
+    for epoch in range(num_epochs):
+        print("epoch num:", epoch)
+
+        correct = 0
+        incorrect = 0
+
+        running_outputs = torch.FloatTensor().cpu()
+        running_labels = torch.LongTensor().cpu()
+        running_loss = 0.0
+
+
+        # Batches
+        with torch.no_grad():
+            for batch_idx, (inputs, labels) in enumerate(test_loader):
+                # optimizer.zero_grad()
+                # mask the inputs
+                inputs = inputs * masks
+
+                inputs, labels = inputs.to(device), labels.to(device)
+                output = net(inputs)
+                loss = criterion(output, labels)
+
+                running_outputs = torch.cat((running_outputs, output.cpu().detach()), 0)
+                running_labels = torch.cat((running_labels, labels.cpu().detach()), 0)
+                running_loss += loss.item()
+                num_batches += 1
+
+        # Accuracy
+        running_outputs = running_outputs.to(device)
+        running_labels = running_labels.to(device)
+
+        for idx, emb in enumerate(running_outputs):
+            pairwise = torch.nn.PairwiseDistance(p=2).to(device)
+            dist = pairwise(emb, running_outputs)
+            closest = torch.topk(dist, 2, largest=False).indices[1]
+            if running_labels[idx] == running_labels[closest]:
+                correct += 1
+            else:
+                incorrect += 1
+
+        print(running_loss / num_batches)
+        print("Correct", correct)
+        print("Incorrect", incorrect)
+        if correct + incorrect != 0:
+            accuracy = correct / (correct + incorrect)
+            train_values.append(accuracy)
+        else:
+            accuracy = "Can't divide by 0."
+        print("Accuracy: ", accuracy)
+
+        loss_values.append(running_loss / num_batches)
+
+        time_elapsed = datetime.now() - start_time
+        print('Time elapsed (hh:mm:ss.ms) {}'.format(time_elapsed))
+    plot6, = plt.plot(train_values)
+
+
+    # plt.legend(["i2","i3","i4", "control", "masked"], loc ="lower right") 
+    plt.legend([plot2,plot3,plot4,plot5,plot6],["i2","i3","i4","control","masked"])
     plt.show()
     plt.savefig('test_accuracy.png')
     plt.close()
@@ -1095,7 +1174,7 @@ def test_model():
     return model, running_loss
 
 # Run Script
-# model.to(device)
-# trained_model, loss = train_model()
+model.to(device)
+trained_model, loss = train_model()
 
 test_results, loss = test_model()
