@@ -9,28 +9,75 @@ import tqdm
 
 # Imports
 from datetime import datetime
-import kornia
 import matplotlib.pyplot as plt
-import matplotlib.style as style
 import numpy as np
-import os
 import pandas as pd
 from PIL import Image
 from pytorch_metric_learning import losses, samplers
-from random import randint
-import shutil
+import random
 from skimage import io, transform
+from sklearn.manifold import TSNE
 import time
 import torch
 from torch.autograd import Variable
 import torch.nn as nn
 from torch.utils.data.sampler import Sampler
 from torchvision import datasets, models, transforms
-from torchvision.utils import save_image
+
+def euclidean_dist(inputs_):
+    # Compute pairwise distance, replace by the official when merged
+    n = inputs_.size(0)
+    dist = torch.pow(inputs_, 2).sum(dim=1, keepdim=True).expand(n, n)
+    dist = dist + dist.t()
+    dist.addmm_(1, -2, inputs_, inputs_.t())
+    dist = dist.clamp(min=1e-12).sqrt()  # for numerical stability
+    return dist
+
+class BatchAllLoss(nn.Module):
+    def __init__(self, device, margin=0.2):
+        super(BatchAllLoss, self).__init__()
+        self.margin = margin
+        self.ranking_loss = nn.MarginRankingLoss(margin=self.margin)
+        self.device = device
+
+    def forward(self, inputs, targets):
+        self.device = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
+        n = inputs.size(0)
+        # Compute pairwise distance, replace by the official when merged
+        dist_mat = euclidean_dist(inputs)
+        # split the positive and negative pairs
+        eyes_ = Variable(torch.eye(n, n)).to(self.device)
+        pos_mask = targets.expand(n, n).eq(targets.expand(n, n).t())
+        neg_mask = eyes_.eq(eyes_) ^ pos_mask
 
 
+        pos_mask = pos_mask ^ eyes_.eq(1)
+        pos_dist = torch.masked_select(dist_mat, pos_mask)
+        neg_dist = torch.masked_select(dist_mat, neg_mask)
 
-from sklearn.manifold import TSNE
+        num_instances = len(pos_dist)//n + 1
+        num_neg_instances = n - num_instances
+        pos_dist = pos_dist.reshape(len(pos_dist)//(num_instances-1), num_instances-1)
+        neg_dist = neg_dist.reshape(len(neg_dist)//(num_neg_instances), num_neg_instances)
+
+        loss = list()
+        for i, pos_pair in enumerate(pos_dist):
+            neg_dist_ = neg_dist[i].repeat(num_instances - 1, 1)
+            pos_dist_ = pos_pair.repeat(num_neg_instances, 1)
+            pos_dist_ = pos_dist_.t()
+            pos_dist_ = pos_dist_.reshape(num_neg_instances * (num_instances - 1))
+            neg_dist_ = neg_dist_.reshape(num_neg_instances * (num_instances - 1))
+
+            y = neg_dist_.data.new()
+            y.resize_as_(neg_dist_.data)
+            y.fill_(1)
+            y = Variable(y)
+            loss.append(self.ranking_loss(neg_dist_, pos_dist_, y))
+        loss = torch.mean(torch.stack([loss_ for loss_ in loss]))
+        return loss
+    
+    def __str__(self):
+        return "Batch All, margin = {}".format(self.margin)
 
 class UnNormalize(object):
     def __init__(self, mean, std):
@@ -45,12 +92,11 @@ class UnNormalize(object):
             Tensor: Normalized image.
         """
         for t, m, s in zip(tensor, self.mean, self.std):
-            # tensor.lo ng()
-            # s = s.byte()
-            
-            # m.long()
-            t.mul_(s).add_(m)
-            # The normalize code -> t.sub_(m).div_(s)
+            # unorm
+            # t.mul_(s).add_(m)
+
+            # norm
+            t.sub_(m).div_(s)
         return tensor
 
 def map_features(outputs, labels, out_file):
@@ -86,33 +132,33 @@ def map_features(outputs, labels, out_file):
 
 # Configurations
 # Device
-device = torch.device("cuda:2" if torch.cuda.is_available() else "cpu")
+device = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
 
 # Num epochs
 num_epochs = 50
 
 # Model
 model = models.resnet50(pretrained=True)
-# model = ClassifierSiLU()
 
 # Optimizer
-optimizer = torch.optim.SGD(model.parameters(), lr=0.05, momentum=0.9)
+optimizer = torch.optim.SGD(model.parameters(), lr=0.01, momentum=0.9)
 
 # Batch size
 batch_size = 32
 
-# Data set
+# # Data set
 train_path = '/lab/vislab/DATA/CUB/images/train/'
 test_path = '/lab/vislab/DATA/CUB/images/test/'
 # train_path = '/lab/vislab/DATA/just/infilling/samples/places2/mini/'
-# train_path = '/lab/vislab/DATA/CARS/car_ims/train'
+# test_path = '/lab/vislab/DATA/just/infilling/samples/places2/mini/'
 
-# mask_path = './samples/places2/mask/'
-# mask_path = './samples/places2/old_masks/dfnet_original/'
 
 
 # Loss function
-criterion = losses.TripletMarginLoss(margin=0.05,triplets_per_anchor="all")
+criterion = losses.TripletMarginLoss(margin=0.2,triplets_per_anchor="all") # so we are already doing batchall
+# criterion = BatchAllLoss(device, margin=0.2)
+# criterion = nn.CrossEntropyLoss()
+
 # criterion = torch.nn.CosineEmbeddingLoss()
 
 class RandomMask(object):
@@ -140,22 +186,20 @@ class RandomMask(object):
 # mask = Image.open('./samples/places2/mask/mask_01.png')
 
 transformations = transforms.Compose([
-    transforms.Resize((256, 256)),
+    transforms.RandomResizedCrop((256, 256)),
     # RandomMask(mask),
     transforms.ToTensor(),
-    transforms.Normalize(mean = [ 0.485, 0.456, 0.406 ], std = [ 0.229, 0.224, 0.225 ])
+    # transforms.Normalize(mean = [ 0.485, 0.456, 0.406 ], std = [ 0.229, 0.224, 0.225 ])
 ])
 
 dataset = datasets.ImageFolder(train_path, transformations)
 test_dataset = datasets.ImageFolder(test_path, transformations)
 
-train_sampler = samplers.MPerClassSampler(dataset.targets, 2, len(dataset))
+train_sampler = samplers.MPerClassSampler(dataset.targets, 8, len(dataset))
 
-train_loader = torch.utils.data.DataLoader(dataset, batch_size=batch_size,
-                                           sampler=train_sampler, num_workers=4, drop_last=True)
+train_loader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=True, sampler=None, num_workers=4, drop_last=True)
 
-test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=batch_size,
-                                           sampler=train_sampler, num_workers=4, drop_last=True)
+test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=batch_size, shuffle=True, sampler=None, num_workers=4, drop_last=True)
 
 # DF-Net Utils
 def resize_like(x, target, mode='bilinear'):
@@ -529,7 +573,7 @@ class Inpainter:
 
     def init_model(self, path):
         if torch.cuda.is_available():
-            self.device = torch.device('cuda:2')
+            self.device = torch.device('cuda:1')
             print('Using gpu.')
         else:
             self.device = torch.device('cpu')
@@ -551,8 +595,7 @@ class Inpainter:
 
     def inpaint(self, imgs, masks):
         print("inpainting images ...")
-
-        # convert to npy -> opencv -> shift colors -> npy -> torch
+#
         imgs = self.to_numpy(imgs)
         for i in range(imgs.shape[0]):
             imgs[i] = cv2.cvtColor(imgs[i], cv2.COLOR_BGR2RGB)
@@ -560,31 +603,33 @@ class Inpainter:
 
         # print("IMGS: AFTER BGR. shape: ", imgs.shape)
         imgs = np.transpose(imgs, [0,3,1,2])
-        imgs = torch.from_numpy(imgs)
+        imgs = torch.from_numpy(imgs)#
 
         imgs = imgs.to(self.device)
         masks = masks.to(self.device)
 
-        # plt.imshow(transforms.ToPILImage()(masks[0].cpu()))
-        # plt.savefig('transformed_mask.png')
-
         imgs = imgs.float().div(255)
         masks = masks.float().div(255)
 
+        # print(imgs.shape)
+        # print(masks.shape)
+
         imgs_miss = imgs * masks
 
+        # print(imgs_miss.shape)
+        # plt.imshow(transforms.ToPILImage()(imgs[0].cpu()))
+        # plt.savefig("imgs.png")
+        # plt.imshow(transforms.ToPILImage()(masks[0].cpu()))
+        # plt.savefig("masks.png")
         # plt.imshow(transforms.ToPILImage()(imgs_miss[0].cpu()))
-        # plt.savefig('transformed_miss.png')
+        # plt.savefig("imgs_miss.png")
 
         result, alpha, raw = self.model(imgs_miss, masks)
         result, alpha, raw = result[0], alpha[0], raw[0]
-        # plt.imshow(transforms.ToPILImage()(result[0][0].cpu()))
-        # plt.savefig('result_before_fusion.png')
-
         result = imgs * masks + result * (1 - masks)
-        # plt.imshow(transforms.ToPILImage()(result[0][0].cpu()))
-        # plt.savefig('result_after_fusion.png')
-
+        # plt.imshow(transforms.ToPILImage()(result[0].cpu()))
+        # plt.savefig("inpainted.png")
+        # 12/0
         return result
 
 
@@ -598,167 +643,25 @@ def train_model():
     pretrained_model_path = './model/model_places2.pth'
     inpainter = Inpainter(pretrained_model_path, 256, 32)
 
-    plt.figure(figsize=(16, 10))
-    plt.title("Inpainting vs Control")
-    plt.xlabel("Epoch")
-    plt.ylabel("Accuracy")
-
-    for i in range(2,3):
-
-        # Epochs
-        correct = 0
-        incorrect = 0
-        num_batches = 1
-        loss_values = []
-        train_values = []
-
-        mask_path = "./samples/places2/mask_0{}/".format(i)
-        masks = []
-        
-        for filename in os.scandir(mask_path):
-            ii = cv2.imread(filename.path)
-            mask = cv2.cvtColor(ii, cv2.COLOR_BGR2GRAY)       
-            mask = np.ascontiguousarray(np.expand_dims(mask, 0)).astype(np.uint8)
-            masks.append(mask)
-
-        masks = np.array(masks)
-        masks = torch.from_numpy(masks)
-
-        for epoch in range(num_epochs):
-            print("epoch num:", epoch)
-
-            for phase in ['train', 'valid']:
-
-                correct = 0
-                incorrect = 0
-
-                running_outputs = torch.FloatTensor().cpu()
-                running_labels = torch.LongTensor().cpu()
-                running_loss = 0.0
-
-                if phase == 'train':
-                    model.train(True)
-                else:
-                    model.train(False)
-
-                # Batches
-                for batch_idx, (inputs, labels) in enumerate(train_loader):
-                    optimizer.zero_grad()
-                    
-                    inpainted_img_batch = inpainter.inpaint(inputs, masks)
-
-                    # inputs, labels = inputs.to(device), labels.to(device)
-                    # output = model(inputs)
-                    inpainted_img_batch, labels = inpainted_img_batch.to(device, dtype=torch.float), labels.to(device)
-
-                    if epoch == 0:
-                        img = inpainted_img_batch[0].cpu()
-                        
-
-                        img = img.cpu().detach().numpy()
-                        # #convert image back to Height,Width,Channels
-                        img = np.transpose(img, (1,2,0))
-                        # #show the image
-                        # img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-                        # img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-                        # img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-                        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-
-
-
-                        # unorm = UnNormalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225))
-                        # unorm(img)
-                        plt.imshow(img)
-                        plt.show()  
-                        plt.savefig("restored.png")
-
-
-
-
-
-
-                        # x = x.mul(255).byte().data.cpu().numpy()
-                        # x = np.transpose(x, [1,2,0])
-                        # x = cv2.cvtColor(x, cv2.COLOR_BGR2RGB)
-                        # # imgs[i] = np.transpose(imgs[i], [2,0,1])
-
-                        # # print("IMGS: AFTER BGR. shape: ", imgs.shape)
-                        # x = np.transpose(x, [2,0,1])
-                        # x = torch.from_numpy(x)
-
-                        # lab_str = str(labels[0].cpu())
-                        # plt.figure(figsize=(16,10))
-
-                        # print("x.shape", x.shape)
-
-                        # plt.imshow(transforms.ToPILImage()(x))
-                        # plt.savefig("restored.png")
-                        # plt.close()
-                    
-                    output = model(inpainted_img_batch)
-
-                    loss = criterion(output, labels)
-                    with torch.set_grad_enabled(phase == 'train'):
-                        if phase == 'train':
-                            loss.backward()
-                            optimizer.step()
-
-                    if phase == 'valid':
-                        running_outputs = torch.cat((running_outputs, output.cpu().detach()), 0)
-                        running_labels = torch.cat((running_labels, labels.cpu().detach()), 0)
-                        running_loss += loss.item()
-                        num_batches += 1
-
-                if phase == 'valid':
-                    # Accuracy
-                    running_outputs = running_outputs.to(device)
-                    running_labels = running_labels.to(device)
-
-                    for idx, emb in enumerate(running_outputs):
-                        pairwise = torch.nn.PairwiseDistance(p=2).to(device)
-                        dist = pairwise(emb, running_outputs)
-                        closest = torch.topk(dist, 2, largest=False).indices[1]
-                        if running_labels[idx] == running_labels[closest]:
-                            correct += 1
-                        else:
-                            incorrect += 1
-
-                    print(running_loss / num_batches)
-                    print("Correct", correct)
-                    print("Incorrect", incorrect)
-                    if correct + incorrect != 0:
-                        accuracy = correct / (correct + incorrect)
-                        train_values.append(accuracy)
-                    else:
-                        accuracy = "Can't divide by 0."
-                    print("Accuracy: ", accuracy)
-
-                    loss_values.append(running_loss / num_batches)
-
-                time_elapsed = datetime.now() - start_time
-                print('Time elapsed (hh:mm:ss.ms) {}'.format(time_elapsed))
-
-        if i == 1: 
-            plot1, = plt.plot(train_values)
-        elif i == 2: 
-            plot2, = plt.plot(train_values)
-        elif i == 3: 
-            plot3, = plt.plot(train_values)
-        elif i == 4: 
-            plot4, = plt.plot(train_values)
-        elif i == 5: 
-            plot5, = plt.plot(train_values)
-
-        # maybe del train_values, loss_values
-        del train_values
-        del loss_values
-        torch.cuda.empty_cache()
-        
+    # Epochs
     correct = 0
     incorrect = 0
     num_batches = 1
     loss_values = []
     train_values = []
+
+    location = [(a,b) for a in range(255) for b in range(255)]
+    small_mask = Image.new('L', (4, 4), 0)
+    masks = []
+    for _ in range(32):
+        base = Image.new('L',(256,256),255)
+        r = random.choice(location)
+        base.paste(small_mask, r)
+        location.pop(location.index(r))
+        base = np.ascontiguousarray(np.expand_dims(base, 0)).astype(np.uint8)
+        masks.append(base)
+    masks = np.array(masks)
+    masks = torch.from_numpy(masks)
 
     for epoch in range(num_epochs):
         print("epoch num:", epoch)
@@ -781,27 +684,20 @@ def train_model():
             for batch_idx, (inputs, labels) in enumerate(train_loader):
                 optimizer.zero_grad()
                 
-                # inpainted_img_batch = inpainter.inpaint(inputs, masks)
+                inpainted_img_batch = inpainter.inpaint(inputs, masks)
 
-                inputs, labels = inputs.to(device), labels.to(device)
-                output = model(inputs)
-                # inpainted_img_batch, labels = inpainted_img_batch.to(device, dtype=torch.float), labels.to(device)
+                # unorm = UnNormalize([ 104/255, 107/255, 128/255 ],[ 1/255, 1/255, 1/255 ])
+                # inpainted_img_batch = unorm(inpainted_img_batch)
+                # inputs = unorm(inputs)
 
-                # if epoch == 0:
-                #     lab_str = str(labels[0].cpu())
-                #     plt.figure(figsize=(16,10))
-                #     plt.imshow(transforms.ToPILImage()(inputs[0].cpu()))
-                #     plt.title(lab_str)
-                #     plt.savefig("inputs_{}.png".format(0))
-                #     plt.close()
+                # plt.imshow(transforms.ToPILImage()(inpainted_img_batch[0].cpu()))
+                # plt.savefig("inpainted.png")
+                # plt.imshow(transforms.ToPILImage()(inputs[0].cpu()))
+                # plt.savefig("input.png")
+                # 12/0
 
-                #     plt.figure(figsize=(16,10))
-                #     plt.imshow(transforms.ToPILImage()(inpainted_img_batch[0].cpu()))
-                #     plt.title(lab_str)
-                #     plt.savefig("inpainted_inputs_{}.png".format(0))
-                #     plt.close()
-                
-                # output = model(inpainted_img_batch)
+                # inpainted_img_batch, labels = inpainted_img_batch.to(device, dtype=torch.float), labels.to(device)                    
+                output = model(inpainted_img_batch)
 
                 loss = criterion(output, labels)
                 with torch.set_grad_enabled(phase == 'train'):
@@ -844,22 +740,13 @@ def train_model():
             time_elapsed = datetime.now() - start_time
             print('Time elapsed (hh:mm:ss.ms) {}'.format(time_elapsed))
 
-        plot6, = plt.plot(train_values, 'b', label='control')
-        torch.cuda.empty_cache()
-
-    # # plt.legend(["inpainting", "control"], loc ="lower right") 
-    # plt.legend([plot2,plot3,plot4,plot5,plot6],[".1", ".25", ".4", ".5", "control"])
-    # plt.show()
-    # plt.savefig('accuracy.png')
-    # plt.close()
-    # plt.figure(figsize=(16, 10))
-    # plt.plot(loss_values)
-    # plt.title("Loss Function")
-    # plt.xlabel("Epoch")
-    # plt.ylabel("Loss")
-    # plt.show()
-    # plt.savefig('loss.png')
-
+    
+    plt.plot(loss_values)
+    plt.title("Train Loss Function")
+    plt.xlabel("Epoch")
+    plt.ylabel("Loss")
+    plt.show()
+    plt.savefig('train_loss.png')
     # map_features(running_outputs.cpu(), running_labels.cpu(), 'features.png')
     torch.save(model.state_dict(), 'saved_model.pth')
     print("Finished training model.")
@@ -873,6 +760,8 @@ def test_model():
     net = models.resnet50(pretrained=True)
     net.load_state_dict(torch.load(PATH))
     net.to(device)
+    net.eval()
+    net.train(False)
     
     # DF-Net Tester Instantiate
     pretrained_model_path = './model/model_places2.pth'
@@ -893,19 +782,23 @@ def test_model():
         train_values = []
 
         mask_path = "./samples/places2/mask_0{}/".format(i)
-        masks = []
-        
-        for filename in os.scandir(mask_path):
-            ii = cv2.imread(filename.path)
-            mask = cv2.cvtColor(ii, cv2.COLOR_BGR2GRAY)       
-            mask = np.ascontiguousarray(np.expand_dims(mask, 0)).astype(np.uint8)
-            masks.append(mask)
 
-        masks = np.array(masks)
-        masks = torch.from_numpy(masks)
 
         for epoch in range(num_epochs):
             print("epoch num:", epoch)
+            location = [(a,b) for a in range(250) for b in range(250)]
+            small_mask = Image.new('L', (2, 2), 'black')
+            masks = []
+            for _ in range(32):
+                base = Image.new('L',(256,256),'white')
+                r = random.choice(location)
+                base.paste(small_mask, r)
+                location.pop(location.index(r))
+                base = np.ascontiguousarray(np.expand_dims(base, 0)).astype(np.uint8)
+                masks.append(base)
+            masks = np.array(masks)
+            masks = torch.from_numpy(masks)
+
 
             correct = 0
             incorrect = 0
@@ -920,61 +813,16 @@ def test_model():
                     # optimizer.zero_grad()
                     
                     inpainted_img_batch = inpainter.inpaint(inputs, masks)
-
+                    # unorm = UnNormalize([ 104/255, 107/255, 128/255 ],[ 1/255, 1/255, 1/255 ])
+                    # inpainted_img_batch = unorm(inpainted_img_batch)
                     # inputs, labels = inputs.to(device), labels.to(device)
                     # output = model(inputs)
+
                     inpainted_img_batch, labels = inpainted_img_batch.to(device, dtype=torch.float), labels.to(device)
 
-                    # if epoch == 0:
-                    #     img = inpainted_img_batch[0].cpu()
-                        
-
-                    #     img = img.cpu().detach().numpy()
-                    #     # #convert image back to Height,Width,Channels
-                    #     img = np.transpose(img, (1,2,0))
-                    #     # #show the image
-                    #     # img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-                    #     # img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-                    #     # img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-                    #     img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-
-                    
-                    #     # unorm = UnNormalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225))
-                    #     # unorm(img)
-                    #     plt.imshow(img)
-                    #     plt.show()  
-                    #     plt.savefig("restored.png")
-
-
-
-
-
-
-                        # x = x.mul(255).byte().data.cpu().numpy()
-                        # x = np.transpose(x, [1,2,0])
-                        # x = cv2.cvtColor(x, cv2.COLOR_BGR2RGB)
-                        # # imgs[i] = np.transpose(imgs[i], [2,0,1])
-
-                        # # print("IMGS: AFTER BGR. shape: ", imgs.shape)
-                        # x = np.transpose(x, [2,0,1])
-                        # x = torch.from_numpy(x)
-
-                        # lab_str = str(labels[0].cpu())
-                        # plt.figure(figsize=(16,10))
-
-                        # print("x.shape", x.shape)
-
-                        # plt.imshow(transforms.ToPILImage()(x))
-                        # plt.savefig("restored.png")
-                        # plt.close()
-                    
                     output = net(inpainted_img_batch)
 
                     loss = criterion(output, labels)
-                    # with torch.set_grad_enabled(phase == 'train'):
-                    #     if phase == 'train':
-                    #         loss.backward()
-                    #         optimizer.step()
 
                     running_outputs = torch.cat((running_outputs, output.cpu().detach()), 0)
                     running_labels = torch.cat((running_labels, labels.cpu().detach()), 0)
@@ -1019,15 +867,7 @@ def test_model():
             plot4, = plt.plot(train_values)
         elif i == 5: 
             plot5, = plt.plot(train_values)
-
-        # maybe del train_values, loss_values
-        del train_values
-        del loss_values
-        torch.cuda.empty_cache()
         
-        # at this point, do the plotting of the control on test 
-
-
     # pure control group :
     correct = 0
     incorrect = 0
@@ -1045,12 +885,25 @@ def test_model():
         running_labels = torch.LongTensor().cpu()
         running_loss = 0.0
 
-
         # Batches
         with torch.no_grad():
-            for batch_idx, (inputs, labels) in enumerate(test_loader):
+            for batch_idx, (tensor, labels) in enumerate(test_loader):
                 # optimizer.zero_grad()
-                # mask the inputs
+                
+                tensor = tensor.mul(255).byte().data.cpu().numpy()
+                tensor = np.transpose(tensor, [0, 2, 3, 1])
+                inputs = tensor
+                for i in range(inputs.shape[0]):
+                    inputs[i] = cv2.cvtColor(inputs[i], cv2.COLOR_BGR2RGB)
+                    # imgs[i] = np.transpose(imgs[i], [2,0,1])
+
+                # print("IMGS: AFTER BGR. shape: ", imgs.shape)
+                inputs = np.transpose(inputs, [0,3,1,2])
+                inputs = torch.from_numpy(inputs)#
+
+                inputs = inputs.float().div(255)
+                # unorm = UnNormalize([ 104/255, 107/255, 128/255 ],[ 1/255, 1/255, 1/255 ])
+                # inputs = unorm(inputs)
 
                 inputs, labels = inputs.to(device), labels.to(device)
                 output = net(inputs)
@@ -1091,86 +944,17 @@ def test_model():
     plot5, = plt.plot(train_values)
 
 
-    correct = 0
-    incorrect = 0
-    num_batches = 1
-    loss_values = []
-    train_values = []
-    mask_path = "./samples/places2/mask_02/"
-    masks = []
-    
-    for filename in os.scandir(mask_path):
-        ii = cv2.imread(filename.path)
-        mask = cv2.cvtColor(ii, cv2.COLOR_BGR2GRAY)       
-        mask = np.ascontiguousarray(np.expand_dims(mask, 0)).astype(np.uint8)
-        masks.append(mask)
-
-    masks = np.array(masks)
-    masks = torch.from_numpy(masks)
-
-    for epoch in range(num_epochs):
-        print("epoch num:", epoch)
-
-        correct = 0
-        incorrect = 0
-
-        running_outputs = torch.FloatTensor().cpu()
-        running_labels = torch.LongTensor().cpu()
-        running_loss = 0.0
-
-
-        # Batches
-        with torch.no_grad():
-            for batch_idx, (inputs, labels) in enumerate(test_loader):
-                # optimizer.zero_grad()
-                # mask the inputs
-                inputs = inputs * masks
-
-                inputs, labels = inputs.to(device), labels.to(device)
-                output = net(inputs)
-                loss = criterion(output, labels)
-
-                running_outputs = torch.cat((running_outputs, output.cpu().detach()), 0)
-                running_labels = torch.cat((running_labels, labels.cpu().detach()), 0)
-                running_loss += loss.item()
-                num_batches += 1
-
-        # Accuracy
-        running_outputs = running_outputs.to(device)
-        running_labels = running_labels.to(device)
-
-        for idx, emb in enumerate(running_outputs):
-            pairwise = torch.nn.PairwiseDistance(p=2).to(device)
-            dist = pairwise(emb, running_outputs)
-            closest = torch.topk(dist, 2, largest=False).indices[1]
-            if running_labels[idx] == running_labels[closest]:
-                correct += 1
-            else:
-                incorrect += 1
-
-        print(running_loss / num_batches)
-        print("Correct", correct)
-        print("Incorrect", incorrect)
-        if correct + incorrect != 0:
-            accuracy = correct / (correct + incorrect)
-            train_values.append(accuracy)
-        else:
-            accuracy = "Can't divide by 0."
-        print("Accuracy: ", accuracy)
-
-        loss_values.append(running_loss / num_batches)
-
-        time_elapsed = datetime.now() - start_time
-        print('Time elapsed (hh:mm:ss.ms) {}'.format(time_elapsed))
-    plot6, = plt.plot(train_values)
-
-
-    # plt.legend(["i2","i3","i4", "control", "masked"], loc ="lower right") 
-    plt.legend([plot2,plot3,plot4,plot5,plot6],["i2","i3","i4","control","masked"])
+    plt.legend([plot2,plot3,plot4,plot5],["i2","i3","i4","control"])
     plt.show()
     plt.savefig('test_accuracy.png')
     plt.close()
-
+    plt.figure(figsize=(16, 10))
+    plt.plot(loss_values)
+    plt.title("Test Loss Function")
+    plt.xlabel("Epoch")
+    plt.ylabel("Loss")
+    plt.show()
+    plt.savefig('test_loss.png')
     return model, running_loss
 
 # Run Script
